@@ -8,8 +8,8 @@ logger = Logger("")
 
 
 class MessageServer:
-    host = "127.0.0.1"
-    port = 65432
+    HOST = "127.0.0.1"
+    PORT = 65432
     name: str
     uuid: str
     symmetric_key: str
@@ -21,7 +21,7 @@ class MessageServer:
             logger.error(f"msg.info file doesn't exists")
         else:
             with open("msg.info", 'r') as file:
-                self.port = file.readline()
+                self.PORT = int(file.readline())
                 self.name = file.readline()
                 self.uuid = file.readline()
                 self.symmetric_key = file.readline()
@@ -32,9 +32,9 @@ class MessageServer:
         """
         import socket
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-
-            s.bind((self.host, self.port))
+            s.bind((self.HOST, self.PORT))
             s.listen()
+            print('Server is now listening on ' + str(self.PORT) + '...')
             s.setblocking(False)
             self.sel.register(s, selectors.EVENT_READ, data=None)
             try:
@@ -61,7 +61,6 @@ class MessageServer:
         conn.setblocking(False)
         events = selectors.EVENT_READ | selectors.EVENT_WRITE
         self.sel.register(conn, events, data=addr)
-
     def service_connection(self, key, mask):
         """
         multiplexing between the open sockets and services them.
@@ -76,6 +75,8 @@ class MessageServer:
         if mask & selectors.EVENT_WRITE:
             pass
 
+
+
     def receive_data(self, key):
         sock: socket.socket = key.fileobj
         recv_data = None
@@ -83,7 +84,7 @@ class MessageServer:
         try:
             recv_data = sock.recv(4096)
         except ConnectionResetError:
-            logger.debug("An existing connection was forcibly closed by the remote host")
+            logger.debug("An existing connection was forcibly closed by the remote HOST")
             self.sel.unregister(sock)
             sock.close()
 
