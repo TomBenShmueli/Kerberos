@@ -67,4 +67,4 @@ class Connection:
 if __name__ == '__main__':
     connection = Connection()
     connection.connect()
-    connection.send_msg("hi")
+    connection.send_msg("Test Message...")
