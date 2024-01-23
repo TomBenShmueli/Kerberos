@@ -1,6 +1,7 @@
 import os
 import selectors
 import socket
+import struct
 from logging import Logger
 
 logger = Logger("")
