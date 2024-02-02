@@ -167,7 +167,7 @@ class AuthServer:
         #  needed implement function use by request code (refer to client file)
         pass
 
-    def generate_key_and_ticket(self,server_socket):
+    def generate_key_and_ticket(self, server_socket):
         client_socket, client_addr = server_socket.accept()
         print(f"Connection from {client_addr}")
 
