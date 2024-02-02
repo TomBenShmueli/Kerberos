@@ -131,6 +131,7 @@ class Connection:
         if not os.path.exists("me.info"):
             self.get_login_details_from_user()
 
+
     def read_servers_info(self) -> bool:
         if not os.path.exists("srv.info"):
             logger.error("srv info not exists")
