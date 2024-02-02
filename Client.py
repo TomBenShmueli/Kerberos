@@ -128,8 +128,9 @@ class Connection:
         self.check_connection()
 
         # asks user for login details if not registered
-        # if not os.path.exists("me.info"):
-        self.get_login_details_from_user()
+        if not os.path.exists("me.info"):
+            self.get_login_details_from_user()
+
 
     def read_servers_info(self) -> bool:
         if not os.path.exists("srv.info"):
