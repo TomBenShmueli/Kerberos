@@ -7,6 +7,7 @@ import hashlib
 from enum import Enum
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
+from Crypto.Hash import SHA256
 from logging import Logger
 
 logger = Logger("")
@@ -15,16 +16,17 @@ logger = Logger("")
 class ClientFauxDB:
     def __init__(self, file_path):
         self.file_path = file_path
+        self.clients_data = self.clients_boot_read_data(file_path)
 
     def clients_write_data(self, user_id, user_name, pw_hash, last_seen):
         with open(self.file_path, 'a') as file:
             file.write(f"'{user_id}:{user_name}:{pw_hash}:{last_seen}\n")
 
-    def clients_boot_read_data(self):
+    def clients_boot_read_data(self,file_path):
         if not os.path.exists("clients"):  # Clients file missing
             logger.error(f"Client file cannot be found. Defaulting to empty dataset...")
             return []
-        file_path = 'clients'
+
         with open(file_path, 'r') as clients_file:  # Read from "Clients" file and create the faux DB
             file_content = clients_file.read()
 
@@ -43,9 +45,20 @@ class ClientFauxDB:
             return clients_data
         return
 
+    def is_client_authorized(self, client_username):
+        if not self.clients_data:
+            return False
+        else:
+            for iterable in self.clients_data:
+                if iterable[2] == client_username:
+                    return True
+
+
+clients_db = ClientFauxDB('clients')
+
 
 class RequestCode(Enum):
-    CLIENT_REQUEST_REGISTER_AUTH_CODE = 1024
+    CLIENT_REQUEST_SIGNUP = 1024
     CLIENT_REQUEST_AES_KEY_FOR_SERVER_MSG = 1027
 
     #     Message server
@@ -66,7 +79,6 @@ class AuthServer:
     PORT = 1256
     VERSION = 24
     sel = selectors.DefaultSelector()
-    clientsDB = ClientFauxDB('clients')
 
     def __init__(self):
         if not os.path.exists("port.info"):
@@ -135,17 +147,25 @@ class AuthServer:
             #  recv_data contains the request data and the header to redirect request to the correct server function
             request = struct.unpack("<16sbHI", recv_data[:23])
             request_code = request[2]
+            print(request)
             #  Parse data and store in a variable
-            if request_code == RequestCode.CLIENT_REQUEST_REGISTER_AUTH_CODE.value:
-                return self.generate_key_and_ticket(self, sock, request)
+            if request_code == RequestCode.CLIENT_REQUEST_SIGNUP.value:
+                return self.register_new_client(self, sock, recv_data)
                 pass
-            elif request_code == RequestCode.CLIENT_REQUEST_AES_KEY_FOR_SERVER_MSG:
+            elif request_code == RequestCode.CLIENT_REQUEST_AES_KEY_FOR_SERVER_MSG.value:
+                return self.generate_key_and_ticket(self, sock, recv_data)
                 pass
 
         except ConnectionResetError:
             logger.debug("An existing connection was forcibly closed by the remote host")
             self.sel.unregister(sock)
             sock.close()
+
+        except Exception:  # placeholder to prevent server crash
+            logger.debug("General Exception")
+            self.sel.unregister(sock)
+            sock.close()
+            return
 
         if not recv_data:
             return
@@ -163,26 +183,19 @@ class AuthServer:
         plaintext = cipher.decrypt_and_verify(ciphertext, tag)
         return plaintext.decode()
 
-    def request_gateway(self):
-        #  needed implement function use by request code (refer to client file)
-        pass
-
-    def generate_key_and_ticket(self, server_socket):
+    def generate_key_and_ticket(self, server_socket, recv_data):
         client_socket, client_addr = server_socket.accept()
         print(f"Connection from {client_addr}")
 
-        # Step 1: Server sends a session key
+        # Server sends a session key
         session_key = self.generate_key()
         client_socket.send(session_key)
 
-        # Step 2: Server receives authentication request
-        username = client_socket.recv(self.PORT).decode()
-
-        # In a real scenario, this would involve a database lookup for the user's credentials.
-        # For simplicity, we just check if the username is 'user' and the password is 'password'.
-        if username == 'user':
+        # Server receives authentication request and performs a lookup on the user
+        username = struct.unpack("<255s255s", recv_data[23:])
+        if clients_db.is_client_authorized(username):
             # Step 3: Server sends a TGT (Ticket-Granting Ticket)
-            tgt = hashlib.sha256(session_key).digest()
+            tgt = SHA256.new(data=session_key.encode()).digest()
             client_socket.send(tgt)
 
             # Step 4: Server receives a request for a service ticket
@@ -199,7 +212,8 @@ class AuthServer:
 
         client_socket.close()
 
-
+    def register_new_client(self,server_socket,recv_data):
+        pass
 if __name__ == '__main__':
     server = AuthServer()
     server.start_server()
