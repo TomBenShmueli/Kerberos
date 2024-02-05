@@ -153,7 +153,6 @@ class AuthServer:
             print(request_headers)
             #  Parse data and store in a variable
             if request_code == RequestCode.CLIENT_REQUEST_SIGNUP.value:
-
                 payload = struct.unpack("<255s255s", recv_data[23:])
                 return self.register_new_client(request_headers, payload)
             elif request_code == RequestCode.CLIENT_REQUEST_AES_KEY_FOR_SERVER_MSG.value:
@@ -203,8 +202,6 @@ class AuthServer:
         return hash_object.digest()
 
     def generate_key_and_ticket(self, server_socket, recv_data):
-        # client_socket, client_addr = server_socket.accept() #TODO no need to accept anything
-        print(f"Generating key for client addr  {client_addr}")
 
         # Server sends a session key
         session_key = self.generate_key()
@@ -225,26 +222,24 @@ class AuthServer:
             # client_socket.send(service_ticket[0])  # Sending ciphertext
             # client_socket.send(service_ticket[1])  # Sending tag
 
-        #     print(f"Authentication successful for user {username} accessing service {service_name}")
-        # else:
-        #     print(f"Authentication failed for user {username}")
-        #
-        # client_socket.close()
-
-    def register_new_client(self, request):
+    def register_new_client(self, request_headers, payload):
         new_uuid = uuid.uuid4()
-        # client_socket, client_addr = server_socket.accept() # TODO there is no need for this, you already accepted the socket earlier
         print(f'Registering new user...')
 
-        username = request[3]
-        password = self.encrypt(request[
-                                    4])  # TODO no 4, you meant to take the user password? if so you should pass the payload also , if so you shouldn't encrypt it.
+        username = payload[0]
+        password = self.encrypt(payload[1])
         if clients_db.is_client_authorized(username):
             try:
                 clients_db.clients_write_data(new_uuid, username, password, datetime.now())
-                return self.send_msg( RESPONSE.AUTH_SERVER_REGISTRATION_SUCCESS)  # TODO response should be headers and payload
+                payload_size = len(request_headers[0])
+                response = struct.pack(f"<bHI16s", self.server_version, RESPONSE.AUTH_SERVER_REGISTRATION_SUCCESS,
+                                       payload_size.to_bytes(4, byteorder='little'), new_uuid)
+                return self.send_msg(response)
             except Exception:  # db write failure
-                return self.send_msg(RESPONSE.AUTH_SERVER_REGISTRATION_FAIL)
+                payload_size = len(request_headers[0])
+                response = struct.pack(f"<bHI16s", self.server_version, RESPONSE.AUTH_SERVER_REGISTRATION_FAIL,
+                                       payload_size.to_bytes(4, byteorder='little'), new_uuid)
+                return self.send_msg(response)
         else:  # user already exists
             return self.send_msg(RESPONSE.AUTH_SERVER_REGISTRATION_FAIL)
         pass
