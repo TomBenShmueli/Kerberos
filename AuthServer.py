@@ -22,7 +22,7 @@ class ClientFauxDB:
         with open(self.file_path, 'a') as file:
             file.write(f"'{user_id}:{user_name}:{pw_hash}:{last_seen}\n")
 
-    def clients_boot_read_data(self,file_path):
+    def clients_boot_read_data(self, file_path):
         if not os.path.exists("clients"):  # Clients file missing
             logger.error(f"Client file cannot be found. Defaulting to empty dataset...")
             return []
@@ -80,6 +80,8 @@ class AuthServer:
     VERSION = 24
     sel = selectors.DefaultSelector()
 
+    socket: socket = None
+
     def __init__(self):
         if not os.path.exists("port.info"):
             logger.error(f"Port.info file doesn't exists, defaults to port 1256")
@@ -117,6 +119,7 @@ class AuthServer:
         accepting connection requests and adding them to the socket_info data structure
         :param sock: the socket itself that was accepted.
         """
+        self.socket = sock
         conn: socket.socket
         conn, addr = sock.accept()
         conn.setblocking(False)
@@ -145,16 +148,16 @@ class AuthServer:
             recv_data = sock.recv(4096)  # 4kb buffer size
             print(recv_data)
             #  recv_data contains the request data and the header to redirect request to the correct server function
-            request = struct.unpack("<16sbHI", recv_data[:23])
-            request_code = request[2]
-            print(request)
+            request_headers = struct.unpack("<16sbHI", recv_data[:23])
+            request_code = request_headers[2]
+            print(request_headers)
             #  Parse data and store in a variable
             if request_code == RequestCode.CLIENT_REQUEST_SIGNUP.value:
-                return self.register_new_client(self, sock, request)
-                pass
+
+                payload = struct.unpack("<255s255s", recv_data[23:])
+                return self.register_new_client(request_headers, payload)
             elif request_code == RequestCode.CLIENT_REQUEST_AES_KEY_FOR_SERVER_MSG.value:
-                return self.generate_key_and_ticket(self, sock, recv_data)
-                pass
+                return self.generate_key_and_ticket(sock, recv_data)
 
         except ConnectionResetError:
             logger.debug("An existing connection was forcibly closed by the remote host")
@@ -169,6 +172,15 @@ class AuthServer:
 
         if not recv_data:
             return
+
+    def send_msg(self, msg: str) -> int:
+        if len(msg) < 4095:
+            logger.info("Error: message is too big")
+            try:
+                return self.socket.send(msg)
+            except Exception as e:
+                print(e)
+                raise Exception("Could not have sent Message")
 
     @staticmethod
     def generate_key():
@@ -191,49 +203,50 @@ class AuthServer:
         return hash_object.digest()
 
     def generate_key_and_ticket(self, server_socket, recv_data):
-        client_socket, client_addr = server_socket.accept()
+        # client_socket, client_addr = server_socket.accept() #TODO no need to accept anything
         print(f"Generating key for client addr  {client_addr}")
 
         # Server sends a session key
         session_key = self.generate_key()
-        client_socket.send(session_key)
+        self.socket.send(session_key)
 
         # Server receives authentication request and performs a lookup on the user
         username = struct.unpack("<255s255s", recv_data[23:])
         if clients_db.is_client_authorized(username):
             # Step 3: Server sends a TGT (Ticket-Granting Ticket)
             tgt = SHA256.new(data=session_key.encode()).digest()
-            client_socket.send(tgt)
+            self.send_msg(str(tgt))
 
             # Step 4: Server receives a request for a service ticket
-            service_name = client_socket.recv(1024).decode()
+            # service_name = client_socket.recv(1024).decode()
+            #
+            # # Step 5: Server sends a service ticket
+            # service_ticket = self.encrypt(session_key, f"{service_name}:{session_key.hex()}")
+            # client_socket.send(service_ticket[0])  # Sending ciphertext
+            # client_socket.send(service_ticket[1])  # Sending tag
 
-            # Step 5: Server sends a service ticket
-            service_ticket = self.encrypt(session_key, f"{service_name}:{session_key.hex()}")
-            client_socket.send(service_ticket[0])  # Sending ciphertext
-            client_socket.send(service_ticket[1])  # Sending tag
+        #     print(f"Authentication successful for user {username} accessing service {service_name}")
+        # else:
+        #     print(f"Authentication failed for user {username}")
+        #
+        # client_socket.close()
 
-            print(f"Authentication successful for user {username} accessing service {service_name}")
-        else:
-            print(f"Authentication failed for user {username}")
-
-        client_socket.close()
-
-    def register_new_client(self, server_socket, request):
+    def register_new_client(self, request):
         new_uuid = uuid.uuid4()
-        client_socket, client_addr = server_socket.accept()
+        # client_socket, client_addr = server_socket.accept() # TODO there is no need for this, you already accepted the socket earlier
         print(f'Registering new user...')
 
         username = request[3]
-        password = self.encrypt(request[4])
+        password = self.encrypt(request[
+                                    4])  # TODO no 4, you meant to take the user password? if so you should pass the payload also , if so you shouldn't encrypt it.
         if clients_db.is_client_authorized(username):
             try:
                 clients_db.clients_write_data(new_uuid, username, password, datetime.now())
-                return client_socket.send(RESPONSE.AUTH_SERVER_REGISTRATION_SUCCESS)
+                return self.send_msg( RESPONSE.AUTH_SERVER_REGISTRATION_SUCCESS)  # TODO response should be headers and payload
             except Exception:  # db write failure
-                return client_socket.send(RESPONSE.AUTH_SERVER_REGISTRATION_FAIL)
+                return self.send_msg(RESPONSE.AUTH_SERVER_REGISTRATION_FAIL)
         else:  # user already exists
-            return client_socket.send(RESPONSE.AUTH_SERVER_REGISTRATION_FAIL)
+            return self.send_msg(RESPONSE.AUTH_SERVER_REGISTRATION_FAIL)
         pass
 
 
