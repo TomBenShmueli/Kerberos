@@ -34,10 +34,6 @@ def decrypt_aes(ciphertext, key):
     return decrypted_data.decode()
 
 
-if __name__ == '__main__':
-    data = encrypt_aes("data", derive_key("123"))
-    print(decrypt_aes(data, derive_key("123")))
-    pass
 
 
 def _is_socket_connected(s: socket.socket) -> bool:
@@ -209,8 +205,6 @@ class Connection:
             if raw_data:
                 print(raw_data)
                 self.analyze_response(raw_data)
-            else:
-                pass
         except ConnectionResetError as e:
             logger.info("{}".format(e))
         except ConnectionAbortedError as e:
@@ -256,6 +250,10 @@ class Connection:
             key = decrypt_aes(encrypted_data, key)
             ticket = payload[2]
 
+# if __name__ == '__main__':
+#     data = encrypt_aes("data", derive_key("123"))
+#     print(decrypt_aes(data, derive_key("123")))
+#     pass
 
 if __name__ == '__main__':
     connection = Connection()

@@ -1,14 +1,18 @@
-import datetime
+from datetime import datetime
 import os
 import selectors
 import socket
 import struct
 import uuid
 from enum import Enum
+from typing import Any
+
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 from Crypto.Hash import SHA256
 from logging import Logger
+import queue
+
 
 logger = Logger("")
 
@@ -45,13 +49,14 @@ class ClientFauxDB:
             return clients_data
         return
 
-    def is_client_authorized(self, client_username):
+    def is_client_exists(self, client_username):
         if not self.clients_data:
             return False
         else:
-            for iterable in self.clients_data:
-                if iterable[2] == client_username:
+            for client in self.clients_data:
+                if client["Name"] == client_username:
                     return True
+            return False
 
 
 clients_db = ClientFauxDB('clients')
@@ -80,9 +85,11 @@ class AuthServer:
     VERSION = 24
     sel = selectors.DefaultSelector()
 
+    messages = queue.Queue()
     socket: socket = None
 
     def __init__(self):
+        self.data = None
         if not os.path.exists("port.info"):
             logger.error(f"Port.info file doesn't exists, defaults to port 1256")
         else:
@@ -132,13 +139,16 @@ class AuthServer:
         :param key: contains the socket.
         :param mask: contains data about the socket.
         """
+        sock = key.fileobj
+        self.data = key.data
 
         # read from socket
         if mask & selectors.EVENT_READ:
             self.receive_data(key)
         # send data to socket
-        if mask & selectors.EVENT_WRITE:
-            pass
+        if mask & selectors.EVENT_WRITE and not self.messages.empty():
+            message = self.messages.get(False)
+            sock.send(message)
 
     def receive_data(self, key):
         sock: socket.socket = key.fileobj
@@ -172,7 +182,7 @@ class AuthServer:
         if not recv_data:
             return
 
-    def send_msg(self, msg: str) -> int:
+    def send_msg(self, msg: Any) -> int:
         if len(msg) < 4095:
             logger.info("Error: message is too big")
             try:
@@ -209,7 +219,7 @@ class AuthServer:
 
         # Server receives authentication request and performs a lookup on the user
         username = struct.unpack("<255s255s", recv_data[23:])
-        if clients_db.is_client_authorized(username):
+        if clients_db.is_client_exists(username):
             # Step 3: Server sends a TGT (Ticket-Granting Ticket)
             tgt = SHA256.new(data=session_key.encode()).digest()
             self.send_msg(str(tgt))
@@ -222,27 +232,36 @@ class AuthServer:
             # client_socket.send(service_ticket[0])  # Sending ciphertext
             # client_socket.send(service_ticket[1])  # Sending tag
 
+    @staticmethod
+    def remove_null_termination(string: str):
+        return string[:string.find("\\0")]
+
     def register_new_client(self, request_headers, payload):
         new_uuid = uuid.uuid4()
         print(f'Registering new user...')
 
-        username = payload[0]
-        password = self.encrypt(payload[1])
-        if clients_db.is_client_authorized(username):
+        username = self.remove_null_termination(payload[0].decode("ascii"))
+        password = self.remove_null_termination(payload[1].decode("ascii"))
+        password = SHA256.new(password.encode()).hexdigest()
+
+        if not clients_db.is_client_exists(username):
             try:
                 clients_db.clients_write_data(new_uuid, username, password, datetime.now())
+                response = struct.pack(f"<bHI16s", self.VERSION, RESPONSE.AUTH_SERVER_REGISTRATION_SUCCESS.value,
+                                       4, str(new_uuid).encode("ascii"))
+
+                self.messages.put(response)
+            except Exception as e:  # db write failure
+                print(e)
                 payload_size = len(request_headers[0])
-                response = struct.pack(f"<bHI16s", self.server_version, RESPONSE.AUTH_SERVER_REGISTRATION_SUCCESS,
+                response = struct.pack(f"<bHI16s", self.VERSION, RESPONSE.AUTH_SERVER_REGISTRATION_FAIL,
                                        payload_size.to_bytes(4, byteorder='little'), new_uuid)
-                return self.send_msg(response)
-            except Exception:  # db write failure
-                payload_size = len(request_headers[0])
-                response = struct.pack(f"<bHI16s", self.server_version, RESPONSE.AUTH_SERVER_REGISTRATION_FAIL,
-                                       payload_size.to_bytes(4, byteorder='little'), new_uuid)
-                return self.send_msg(response)
+                self.messages.put(response)
         else:  # user already exists
-            return self.send_msg(RESPONSE.AUTH_SERVER_REGISTRATION_FAIL)
-        pass
+            payload_size = 0
+            response = struct.pack(f"<bHI", self.VERSION, RESPONSE.AUTH_SERVER_REGISTRATION_FAIL,
+                                   payload_size.to_bytes(0, byteorder='little'))
+            return self.messages.put(response)
 
 
 if __name__ == '__main__':
