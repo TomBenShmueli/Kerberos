@@ -1,3 +1,4 @@
+import hashlib
 import os
 import socket
 import time
@@ -7,8 +8,36 @@ import struct
 
 from Crypto.Random import get_random_bytes
 from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+from Crypto.Hash import SHA256
 
 logger = Logger("")
+
+
+def derive_key(password):
+    from Crypto.Hash import SHA256
+    hash_object = SHA256.new(data=password.encode())
+    return hash_object.digest()
+
+
+def encrypt_aes(data, key):
+    cipher = AES.new(key, AES.MODE_CBC, get_random_bytes(AES.block_size))
+    ciphertext = cipher.encrypt(pad(data.encode(), AES.block_size))
+    return cipher.iv + ciphertext
+
+
+def decrypt_aes(ciphertext, key):
+    iv = ciphertext[:AES.block_size]
+    ciphertext = ciphertext[AES.block_size:]
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    decrypted_data = unpad(cipher.decrypt(ciphertext), AES.block_size)
+    return decrypted_data.decode()
+
+
+if __name__ == '__main__':
+    data = encrypt_aes("data", derive_key("123"))
+    print(decrypt_aes(data, derive_key("123")))
+    pass
 
 
 def _is_socket_connected(s: socket.socket) -> bool:
@@ -90,7 +119,8 @@ class Connection:
     is_connected: bool = False
 
     username: str
-    client_id: str
+    password: str = ""
+    client_id: str = ""
     nonce: bytes
 
     def __init__(self):
@@ -99,8 +129,7 @@ class Connection:
 
     def register_with_auth_server(self, username, password):
         msg_bytes = Message.register_auth_server(self.VERSION, username, password)
-        bytes_sent = self.send_msg(msg_bytes)
-        print("bytes sent {}", bytes_sent)
+        return self.send_msg(msg_bytes)
 
     def get_login_details_from_user(self):
         self.username = input("Enter Username:")
@@ -111,12 +140,11 @@ class Connection:
         while len(password) > 255:
             password = input("Too long of a password, Enter password:")
 
-        # First login Register at auth server
-        self.register_with_auth_server(self.username, password)
+        self.password = password
 
     def request_aes_key(self):
         self.nonce = generate_nonce(8)
-        print(Message.request_aes_key(self.client_id, self.VERSION, self.message_server_address, self.nonce))
+        return Message.request_aes_key(self.client_id, self.VERSION, self.message_server_address, self.nonce)
 
     def check_connection(self):
         self.is_connected = _is_socket_connected(self.socket)
@@ -128,9 +156,21 @@ class Connection:
         self.check_connection()
 
         # asks user for login details if not registered
-        if not os.path.exists("me.info"):
-            self.get_login_details_from_user()
+        # if not os.path.exists("me.info"):
+        self.get_login_details_from_user()
+        # First login Register at auth server
+        self.register_with_auth_server(self.username, self.password)
 
+        # get the users password again
+        # else:
+        #     self.password = input("Enter Password:")
+
+        # endless loop of listening
+        while True:
+            if self.is_connected:
+                connection.recv_messages()
+            else:
+                time.sleep(0.1)
 
     def read_servers_info(self) -> bool:
         if not os.path.exists("srv.info"):
@@ -210,7 +250,11 @@ class Connection:
             # 97 bytes of ticket
 
             payload = struct.unpack("<16s56s97s", raw_data[7:])
-            pass
+            encrypted_data = payload[1]
+            key = derive_key(self.password)
+            print(key)
+            key = decrypt_aes(encrypted_data, key)
+            ticket = payload[2]
 
 
 if __name__ == '__main__':
