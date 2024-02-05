@@ -1,9 +1,9 @@
+import datetime
 import os
 import selectors
 import socket
 import struct
-import json
-import hashlib
+import uuid
 from enum import Enum
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
@@ -150,7 +150,7 @@ class AuthServer:
             print(request)
             #  Parse data and store in a variable
             if request_code == RequestCode.CLIENT_REQUEST_SIGNUP.value:
-                return self.register_new_client(self, sock, recv_data)
+                return self.register_new_client(self, sock, request)
                 pass
             elif request_code == RequestCode.CLIENT_REQUEST_AES_KEY_FOR_SERVER_MSG.value:
                 return self.generate_key_and_ticket(self, sock, recv_data)
@@ -170,22 +170,29 @@ class AuthServer:
         if not recv_data:
             return
 
-    def generate_key(self):
-        return get_random_bytes(16)  # 16 bytes for AES-128
+    @staticmethod
+    def generate_key():
+        return get_random_bytes(32)  # 32 bytes for AES-128
 
-    def encrypt(self, key, data):
+    @staticmethod
+    def encrypt(key, data):
         cipher = AES.new(key, AES.MODE_EAX)
         ciphertext, tag = cipher.encrypt_and_digest(data.encode())
         return ciphertext, tag
 
-    def decrypt(self, key, ciphertext, tag):
+    @staticmethod
+    def decrypt(key, ciphertext, tag):
         cipher = AES.new(key, AES.MODE_EAX)
         plaintext = cipher.decrypt_and_verify(ciphertext, tag)
         return plaintext.decode()
 
+    def derive_key(password):
+        hash_object = SHA256.new(data=password.encode())
+        return hash_object.digest()
+
     def generate_key_and_ticket(self, server_socket, recv_data):
         client_socket, client_addr = server_socket.accept()
-        print(f"Connection from {client_addr}")
+        print(f"Generating key for client addr  {client_addr}")
 
         # Server sends a session key
         session_key = self.generate_key()
@@ -212,8 +219,24 @@ class AuthServer:
 
         client_socket.close()
 
-    def register_new_client(self,server_socket,recv_data):
+    def register_new_client(self, server_socket, request):
+        new_uuid = uuid.uuid4()
+        client_socket, client_addr = server_socket.accept()
+        print(f'Registering new user...')
+
+        username = request[3]
+        password = self.encrypt(request[4])
+        if clients_db.is_client_authorized(username):
+            try:
+                clients_db.clients_write_data(new_uuid, username, password, datetime.now())
+                return client_socket.send(RESPONSE.AUTH_SERVER_REGISTRATION_SUCCESS)
+            except Exception:  # db write failure
+                return client_socket.send(RESPONSE.AUTH_SERVER_REGISTRATION_FAIL)
+        else:  # user already exists
+            return client_socket.send(RESPONSE.AUTH_SERVER_REGISTRATION_FAIL)
         pass
+
+
 if __name__ == '__main__':
     server = AuthServer()
     server.start_server()
