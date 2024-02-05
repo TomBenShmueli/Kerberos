@@ -24,30 +24,32 @@ class ClientFauxDB:
 
     def clients_write_data(self, user_id, user_name, pw_hash, last_seen):
         with open(self.file_path, 'a') as file:
-            file.write(f"'{user_id}:{user_name}:{pw_hash}:{last_seen}\n")
+            file.write(f"'\n{user_id}:{user_name}:{pw_hash}:{last_seen}")
 
     def clients_boot_read_data(self, file_path):
         if not os.path.exists("clients"):  # Clients file missing
             logger.error(f"Client file cannot be found. Defaulting to empty dataset...")
             return []
+        try:
+            with open(file_path, 'r') as clients_file:  # Read from "Clients" file and create the faux DB
+                file_content = clients_file.read()
 
-        with open(file_path, 'r') as clients_file:  # Read from "Clients" file and create the faux DB
-            file_content = clients_file.read()
+                # client data processed into rows
+                clients_raw_data = [rawData.strip() for rawData in file_content.split('\n') if rawData]
 
-            # client data processed into rows
-            clients_raw_data = [rawData.strip() for rawData in file_content.split('\n') if rawData]
-
-            # parse data from the following format ID:Name:PasswordHash:LastSeen to objects for faster performance
-            clients_data = []
-            for rawData in clients_raw_data:
-                rawDataSubString = rawData.split(':')  # assuming data integrity from file
-                newDataEntry = {'ID': rawDataSubString[0],
-                                'Name': rawDataSubString[1],
-                                'PasswordHash': rawDataSubString[2],
-                                'LastSeen': rawDataSubString[3]}
-                clients_data.append(newDataEntry)
-            return clients_data
-        return
+                # parse data from the following format ID:Name:PasswordHash:LastSeen to objects for faster performance
+                clients_data = []
+                for rawData in clients_raw_data:
+                    rawDataSubString = rawData.split(':')  # assuming data integrity from file
+                    newDataEntry = {'ID': rawDataSubString[0],
+                                    'Name': rawDataSubString[1],
+                                    'PasswordHash': rawDataSubString[2],
+                                    'LastSeen': rawDataSubString[3]}
+                    clients_data.append(newDataEntry)
+                return clients_data
+        except Exception as e:
+            logger.error(f'Failed to read from faux DB' + e)
+            return []
 
     def is_client_exists(self, client_username):
         if not self.clients_data:
@@ -191,26 +193,6 @@ class AuthServer:
                 print(e)
                 raise Exception("Could not have sent Message")
 
-    @staticmethod
-    def generate_key():
-        return get_random_bytes(32)  # 32 bytes for AES-128
-
-    @staticmethod
-    def encrypt(key, data):
-        cipher = AES.new(key, AES.MODE_EAX)
-        ciphertext, tag = cipher.encrypt_and_digest(data.encode())
-        return ciphertext, tag
-
-    @staticmethod
-    def decrypt(key, ciphertext, tag):
-        cipher = AES.new(key, AES.MODE_EAX)
-        plaintext = cipher.decrypt_and_verify(ciphertext, tag)
-        return plaintext.decode()
-
-    def derive_key(password):
-        hash_object = SHA256.new(data=password.encode())
-        return hash_object.digest()
-
     def generate_key_and_ticket(self, server_socket, recv_data):
 
         # Server sends a session key
@@ -232,10 +214,6 @@ class AuthServer:
             # client_socket.send(service_ticket[0])  # Sending ciphertext
             # client_socket.send(service_ticket[1])  # Sending tag
 
-    @staticmethod
-    def remove_null_termination(string: str):
-        return string[:string.find("\\0")]
-
     def register_new_client(self, request_headers, payload):
         new_uuid = uuid.uuid4()
         print(f'Registering new user...')
@@ -249,7 +227,7 @@ class AuthServer:
                 clients_db.clients_write_data(new_uuid, username, password, datetime.now())
                 response = struct.pack(f"<bHI16s", self.VERSION, RESPONSE.AUTH_SERVER_REGISTRATION_SUCCESS.value,
                                        4, str(new_uuid).encode("ascii"))
-
+                logger.info(f'User {username} was registered successfully.')
                 self.messages.put(response)
             except Exception as e:  # db write failure
                 print(e)
@@ -258,11 +236,36 @@ class AuthServer:
                                        payload_size.to_bytes(4, byteorder='little'), new_uuid)
                 self.messages.put(response)
         else:  # user already exists
+            logger.info(f'User {username} is already registered.')
             payload_size = 0
             response = struct.pack(f"<bHI", self.VERSION, RESPONSE.AUTH_SERVER_REGISTRATION_FAIL,
                                    payload_size.to_bytes(0, byteorder='little'))
             return self.messages.put(response)
 
+    @staticmethod
+    def generate_key():
+        return get_random_bytes(32)  # 32 bytes for AES-128
+
+    @staticmethod
+    def encrypt(key, data):
+        cipher = AES.new(key, AES.MODE_EAX)
+        ciphertext, tag = cipher.encrypt_and_digest(data.encode())
+        return ciphertext, tag
+
+    @staticmethod
+    def decrypt(key, ciphertext, tag):
+        cipher = AES.new(key, AES.MODE_EAX)
+        plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+        return plaintext.decode()
+
+    @staticmethod
+    def derive_key(password):
+        hash_object = SHA256.new(data=password.encode())
+        return hash_object.digest()
+
+    @staticmethod
+    def remove_null_termination(string: str):
+        return string[:string.find("\\0")]
 
 if __name__ == '__main__':
     server = AuthServer()

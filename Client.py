@@ -217,7 +217,7 @@ class Connection:
                 return self.socket.send(msg)
             except Exception as e:
                 print(e)
-                raise Exception("Could not have sent Message")
+                logger.error('Action failed with exception ' + e)
 
     def disconnect(self):
         self.socket.close()
