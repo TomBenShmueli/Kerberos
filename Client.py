@@ -2,6 +2,7 @@ import hashlib
 import os
 import socket
 import time
+import uuid
 from enum import Enum
 from logging import Logger
 import struct
@@ -32,8 +33,6 @@ def decrypt_aes(ciphertext, key):
     cipher = AES.new(key, AES.MODE_CBC, iv)
     decrypted_data = unpad(cipher.decrypt(ciphertext), AES.block_size)
     return decrypted_data.decode()
-
-
 
 
 def _is_socket_connected(s: socket.socket) -> bool:
@@ -67,13 +66,13 @@ class RESPONSE(Enum):
 
 
 class Message:
-    clientID: str
+    clientID: uuid.UUID
     version: int
     code: int
     payload_size: int
     payload: any
 
-    def __init__(self, client_id: str, version: int, code: int, payload_size: int, payload):
+    def __init__(self, client_id: uuid.UUID, version: int, code: int, payload_size: int, payload):
         self.clientID = client_id
         self.version = version
         self.code = code
@@ -81,7 +80,7 @@ class Message:
         self.payload = payload
 
     def get_bytes(self):
-        return struct.pack("<16sbHI", self.clientID.encode("ascii"), self.version, self.code,
+        return struct.pack("<16sBHI", self.clientID.bytes, self.version, self.code,
                            self.payload_size) + self.payload
 
     @staticmethod
@@ -91,8 +90,8 @@ class Message:
 
         username_with_null_char = username + "\\0"
         password_with_null_char = password + "\\0"
-
-        return Message("", version, CODE.CLIENT_REQUEST_REGISTER_AUTH_CODE.value, payload_size,
+        return Message(uuid.UUID(bytes=b'\x00' * 16), version, CODE.CLIENT_REQUEST_REGISTER_AUTH_CODE.value,
+                       payload_size,
                        struct.pack("<255s255s", username_with_null_char.encode("ascii"),
                                    password_with_null_char.encode("ascii"))).get_bytes()
 
@@ -116,7 +115,7 @@ class Connection:
 
     username: str
     password: str = ""
-    client_id: str = ""
+    client_id: uuid.UUID
     nonce: bytes
 
     def __init__(self):
@@ -140,7 +139,8 @@ class Connection:
 
     def request_aes_key(self):
         self.nonce = generate_nonce(8)
-        return Message.request_aes_key(self.client_id, self.VERSION, self.message_server_address, self.nonce)
+        return self.send_msg(
+            Message.request_aes_key(self.client_id, self.VERSION, self.message_server_address, self.nonce))
 
     def check_connection(self):
         self.is_connected = _is_socket_connected(self.socket)
@@ -152,14 +152,17 @@ class Connection:
         self.check_connection()
 
         # asks user for login details if not registered
-        # if not os.path.exists("me.info"):
-        self.get_login_details_from_user()
-        # First login Register at auth server
-        self.register_with_auth_server(self.username, self.password)
-
+        if not os.path.exists("me.info"):
+            self.get_login_details_from_user()
+            # First login Register at auth server
+            self.register_with_auth_server(self.username, self.password)
         # get the users password again
-        # else:
-        #     self.password = input("Enter Password:")
+        else:
+            self.password = input("Enter Password:")
+
+        if self.request_aes_key() > 0:
+            print("key request sent to server")
+            pass
 
         # endless loop of listening
         while True:
@@ -194,7 +197,7 @@ class Connection:
         else:
             with open("me.info", "r") as me_file:
                 self.username = me_file.readline()
-                self.client_id = me_file.readline()
+                self.client_id = uuid.UUID(me_file.readline())
 
     def recv_messages(self):
         if not self.is_connected:
@@ -217,23 +220,25 @@ class Connection:
                 return self.socket.send(msg)
             except Exception as e:
                 print(e)
-                logger.error('Action failed with exception ' + e)
+                logger.error('Action failed with exception ' + str(e))
 
     def disconnect(self):
         self.socket.close()
         self.is_connected = False
 
     def analyze_response(self, raw_data):
-        response_header = struct.unpack("<bHI", raw_data[:7])
+        response_header = struct.unpack("<BHI", raw_data[:7])
         response_code = response_header[1]
         response_payload_size = response_header[2]
 
         if response_code == RESPONSE.AUTH_SERVER_REGISTRATION_SUCCESS.value:
-            payload = struct.unpack("16s", raw_data[7:])
-            data = payload[0].decode("ascii")
+            payload = struct.unpack("<16s", raw_data[7:])
+            client_uuid = uuid.UUID(bytes=payload[0])
+            data = str(client_uuid)
             with open("me.info", "w") as me_file:
                 me_file.writelines([self.username, "\n", data])
-                self.client_id = data
+                me_file.flush()
+                self.client_id = client_uuid
 
         if response_code == RESPONSE.AUTH_SERVER_REGISTRATION_FAIL.value:
             logger.error("Registration failed")
@@ -249,6 +254,7 @@ class Connection:
             print(key)
             key = decrypt_aes(encrypted_data, key)
             ticket = payload[2]
+
 
 # if __name__ == '__main__':
 #     data = encrypt_aes("data", derive_key("123"))
