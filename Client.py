@@ -6,6 +6,7 @@ import uuid
 from enum import Enum
 from logging import Logger
 import struct
+from typing import Tuple
 
 from Crypto.Random import get_random_bytes
 from Crypto.Cipher import AES
@@ -15,24 +16,16 @@ from Crypto.Hash import SHA256
 logger = Logger("")
 
 
-def derive_key(password):
-    from Crypto.Hash import SHA256
-    hash_object = SHA256.new(data=password.encode())
-    return hash_object.digest()
-
-
 def encrypt_aes(data, key):
     cipher = AES.new(key, AES.MODE_CBC, get_random_bytes(AES.block_size))
     ciphertext = cipher.encrypt(pad(data.encode(), AES.block_size))
     return cipher.iv + ciphertext
 
 
-def decrypt_aes(ciphertext, key):
-    iv = ciphertext[:AES.block_size]
-    ciphertext = ciphertext[AES.block_size:]
+def decrypt_aes(ciphertext, key, iv):
     cipher = AES.new(key, AES.MODE_CBC, iv)
     decrypted_data = unpad(cipher.decrypt(ciphertext), AES.block_size)
-    return decrypted_data.decode()
+    return decrypted_data
 
 
 def _is_socket_connected(s: socket.socket) -> bool:
@@ -90,6 +83,7 @@ class Message:
 
         username_with_null_char = username + "\\0"
         password_with_null_char = password + "\\0"
+        # sets empty uuid for registration
         return Message(uuid.UUID(bytes=b'\x00' * 16), version, CODE.CLIENT_REQUEST_REGISTER_AUTH_CODE.value,
                        payload_size,
                        struct.pack("<255s255s", username_with_null_char.encode("ascii"),
@@ -102,7 +96,7 @@ class Message:
                        struct.pack("<16s8s", message_server_address.encode("ascii"), nonce)).get_bytes()
 
 
-class Connection:
+class Client:
     auth_server_address = "127.0.0.1"
     auth_server_port = 1256
 
@@ -112,11 +106,16 @@ class Connection:
 
     socket: socket = None
     is_connected: bool = False
+    registration_waiting: bool = True
+    key_request_waiting: bool = True
 
     username: str
     password: str = ""
     client_id: uuid.UUID
     nonce: bytes
+
+    symmetric_key_for_msg_server: bytes
+    ticket: Tuple
 
     def __init__(self):
         self.read_servers_info()
@@ -145,7 +144,7 @@ class Connection:
     def check_connection(self):
         self.is_connected = _is_socket_connected(self.socket)
 
-    def connect(self):
+    def start(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket = sock
         sock.connect((self.auth_server_address, self.auth_server_port))
@@ -156,20 +155,32 @@ class Connection:
             self.get_login_details_from_user()
             # First login Register at auth server
             self.register_with_auth_server(self.username, self.password)
+
+            # endless loop of listening till server response to registration
+            while self.registration_waiting:
+                if self.is_connected:
+                    client.recv_messages()
+                else:
+                    time.sleep(0.1)
+
         # get the users password again
         else:
             self.password = input("Enter Password:")
 
         if self.request_aes_key() > 0:
-            print("key request sent to server")
-            pass
+            print("Key request sent to server...")
+            time.sleep(0.5)
+            while self.key_request_waiting:
+                if self.is_connected:
+                    client.recv_messages()
+                else:
+                    time.sleep(0.1)
 
-        # endless loop of listening
-        while True:
-            if self.is_connected:
-                connection.recv_messages()
-            else:
-                time.sleep(0.1)
+            # closes connection with auth server.
+            sock.close()
+            # start connection to msg server.
+            self.connect_to_msg_server()
+
 
     def read_servers_info(self) -> bool:
         if not os.path.exists("srv.info"):
@@ -188,7 +199,7 @@ class Connection:
                 self.message_server_address = message_server_data[:colon_index_auth]
                 self.message_server_port = int(message_server_data[colon_index_auth + 1:].replace("\n", ""))
 
-            return True
+            # return True
 
     def read_client_info(self) -> bool:
         if not os.path.exists("me.info"):
@@ -227,40 +238,53 @@ class Connection:
         self.is_connected = False
 
     def analyze_response(self, raw_data):
-        response_header = struct.unpack("<BHI", raw_data[:7])
-        response_code = response_header[1]
-        response_payload_size = response_header[2]
+        headers_size = 7
+        ticket_size = 103
+        aes_key_index = 3
+        response_code_index = 1
+
+        client_id_index = 0
+        iv_index = 1
+
+        response_header = struct.unpack("<BHI", raw_data[:headers_size])
+        response_code = response_header[response_code_index]
 
         if response_code == RESPONSE.AUTH_SERVER_REGISTRATION_SUCCESS.value:
-            payload = struct.unpack("<16s", raw_data[7:])
-            client_uuid = uuid.UUID(bytes=payload[0])
+            payload = struct.unpack("<16s", raw_data[headers_size:])
+            client_uuid = uuid.UUID(bytes=payload[client_id_index])
             data = str(client_uuid)
+            # saves client id to file
             with open("me.info", "w") as me_file:
                 me_file.writelines([self.username, "\n", data])
                 me_file.flush()
                 self.client_id = client_uuid
+            self.registration_waiting = False
 
         if response_code == RESPONSE.AUTH_SERVER_REGISTRATION_FAIL.value:
             logger.error("Registration failed")
 
         if response_code == RESPONSE.SYMMETRIC_KEY_SUCCESS.value:
-            # client id of 16 bytes
-            # 56 bytes of encrypted key
-            # 97 bytes of ticket
+            # unpacks the response from server
+            payload = struct.unpack("<16s16s16s48sB16s16sQ16s48s24s", raw_data[headers_size:])
+            iv = payload[iv_index]
 
-            payload = struct.unpack("<16s56s97s", raw_data[7:])
-            encrypted_data = payload[1]
-            key = derive_key(self.password)
-            print(key)
-            key = decrypt_aes(encrypted_data, key)
-            ticket = payload[2]
+            # gets the password hash to open the encryption
+            key = SHA256.new(self.password.encode()).digest()
 
+            self.symmetric_key_for_msg_server = decrypt_aes(payload[aes_key_index], key, iv)
+            self.ticket = struct.unpack("<B16s16sQ16s48s24s", raw_data[ticket_size:])
 
-# if __name__ == '__main__':
-#     data = encrypt_aes("data", derive_key("123"))
-#     print(decrypt_aes(data, derive_key("123")))
-#     pass
+            # Todo check nonce match the nonce that client sent.
+
+            print(f"payload 3 :{payload[3]}")
+            print(f"decrepted key: : {key}")
+
+            self.key_request_waiting = False
+
+    def connect_to_msg_server(self):
+        pass
+
 
 if __name__ == '__main__':
-    connection = Connection()
-    connection.connect()
+    client = Client()
+    client.start()

@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import MagicMock
 
 import Client
-from Client import Connection, Message, CODE
+from Client import Client, Message, CODE
 from unittest.mock import patch, MagicMock
 
 from Crypto.Cipher import AES
@@ -25,13 +25,13 @@ class ClientTests(unittest.TestCase):
 
     @staticmethod
     def test_client_response_registration_success():
-        conn = Connection()
+        conn = Client()
         raw_data = struct.pack("<bHI16s", 24, 1600, 16, "64f3f63985f04beb81a0e43321880182".encode("utf-8"))
         conn.analyze_response(raw_data)
         # self.assertEqual(True, False)  # add assertion here
 
     def test_client_response_SYMMETRIC_KEY_SUCCESS(self):
-        conn = Connection()
+        conn = Client()
 
         with patch.object(conn, "password", new="123"):
             # <bHI16s16sQ32sB16s16s8s16s32s8s
@@ -60,14 +60,14 @@ class ClientTests(unittest.TestCase):
 
     @patch('Client.Connection.send_msg')
     def test_registration_request(self, mock_func: MagicMock):
-        conn = Connection()
+        conn = Client()
         mock_func.return_value = 20
         result = conn.register_with_auth_server("user123", "1239")
         self.assertEqual(result, 20)
 
     @staticmethod
     def test_aes_key_request():
-        conn = Connection()
+        conn = Client()
         with patch.object(conn, "client_id", new="Ok"):
             patch.object(conn, "VERSION", new=24)
             patch.object(conn, "message_server_address", new="127.0.0.1")

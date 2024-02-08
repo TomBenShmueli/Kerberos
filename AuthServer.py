@@ -74,13 +74,13 @@ class ClientFauxDB:
             return False
         else:
             for client in self.clients_data:
-                if client["ID"] == id:
+                if str(client["ID"]) == id.strip():
                     return True
             return False
 
     def get_password(self, id):
         for client in self.clients_data:
-            if client["ID"] == id:
+            if str(client["ID"]) == id:
                 return client["PasswordHash"]
 
 
@@ -220,6 +220,7 @@ class AuthServer:
 
         client_id = str(uuid.UUID(bytes=headers[0]))
         payload = struct.unpack("<16sQ", payload)
+        # todo change so that we read the server id from srv.info
         server_id = payload[0].decode()
         nonce = payload[1]
         iv = self.generate_iv()
@@ -227,30 +228,41 @@ class AuthServer:
         # Server sends a session key
         aes_key = self.generate_key()
 
-        # payload = struct.unpack("<16s8s", payload)
-
         # Server receives authentication request and performs a lookup on the user
         if clients_db.is_id_exists(client_id):
-            payload_size = 0  # todo change
-            headers_response = struct.pack(f"<BHI", self.VERSION, RESPONSE.SYMMETRIC_KEY_SUCCESS.value,
-                                           payload_size)
 
-            encrypted_key_field = struct.pack("<16s", iv) + self.create_key_field(aes_key, client_id, nonce)
+            try:
+                client_id_field = struct.pack("<16s", uuid.UUID(client_id).bytes)
+                encrypted_key_field = struct.pack("<16s", iv) + self.create_key_field(aes_key, client_id, nonce, iv)
+                ticket_field = self.create_ticket_field(client_id, server_id, iv, aes_key)
 
-            ticket_field = self.create_ticket_field(client_id, server_id, iv, aes_key)
+                payload_size = len(client_id_field) + len(encrypted_key_field) + len(ticket_field)
+                headers_response = struct.pack(f"<BHI", self.VERSION, RESPONSE.SYMMETRIC_KEY_SUCCESS.value,
+                                               payload_size)
+                response_payload = client_id_field + encrypted_key_field + ticket_field
 
+                response = headers_response + response_payload
+                print("sent client AES encryption key successfully")
+                self.messages.put(response)
+            except Exception as e:
+                print(e)
         else:
+            print("client id not exists")
             # Todo should return message with fail code
             pass
 
-    def create_key_field(self, aes_key, client_id, nonce):
+    def create_key_field(self, aes_key, client_id, nonce, iv):
         client_hashed_password = clients_db.get_password(client_id)
-        client_hashed_password = SHA256.new(bytes.fromhex(client_hashed_password)).digest()
+        client_hashed_password = bytes.fromhex(client_hashed_password)
 
         data = nonce.to_bytes(8, 'little')
-        encrypted_nonce = self.encrypt_aes(data, client_hashed_password)
-        encrypted_aes_key = self.encrypt_aes(bytes(aes_key), client_hashed_password)
-        return struct.pack("<24s48s", encrypted_nonce, encrypted_aes_key)
+        encrypted_nonce = self.encrypt_aes(data, client_hashed_password, iv)
+        encrypted_aes_key = self.encrypt_aes(bytes(aes_key), client_hashed_password, iv)
+
+        print(f"bytes fo aes key:,{bytes(aes_key)}")
+        # print(f"decrypt aes key: {self.decrypt_aes(encrypted_aes_key, client_hashed_password, iv)}")
+
+        return struct.pack("<16s48s", encrypted_nonce, encrypted_aes_key)
 
     def create_ticket_field(self, client_id, server_id, iv, aes_key):
 
@@ -259,12 +271,10 @@ class AuthServer:
         # Add 3600 seconds (1 hour) to the current timestamp
         expiration_timestamp = current_timestamp + 3600
 
-        try:
-            # Todo should make new iv for msg server
-            # Todo change server id it's not coming as it should from the client
-            part_1 = struct.pack("<B16s16sQ16s", self.VERSION, client_id.encode(), server_id.encode(), current_timestamp, iv)
-        except Exception as e:
-            print(e)
+        # Todo should make new iv for msg server
+        # Todo change server id it's not coming as it should from the client
+        part_1 = struct.pack("<B16s16sQ16s", self.VERSION, client_id.encode(), server_id.encode(),
+                             current_timestamp, iv)
 
         # To read from msg.info
         hashed_msg_server_password: bytes
@@ -274,12 +284,14 @@ class AuthServer:
             line = msg_file.readline()
             hashed_msg_server_password = base64.b64decode(line)
 
-        encrypted_aes_key = self.encrypt_aes(bytes(aes_key), hashed_msg_server_password)
+        encrypted_aes_key = self.encrypt_aes(bytes(aes_key), hashed_msg_server_password, iv)
         time_expiration_bytes = expiration_timestamp.to_bytes((expiration_timestamp.bit_length() + 7) // 8, 'little')
-        encrypted_expiration_time = self.encrypt_aes(time_expiration_bytes, hashed_msg_server_password)
+        encrypted_expiration_time = self.encrypt_aes(time_expiration_bytes, hashed_msg_server_password, iv)
 
         part_2 = struct.pack("<48s24s", encrypted_aes_key, encrypted_expiration_time)
 
+        print("ticket bytes")
+        print(part_1 + part_2)
         return part_1 + part_2
 
     def register_new_client(self, request_headers, payload):
@@ -319,29 +331,10 @@ class AuthServer:
         return get_random_bytes(32)  # 32 bytes for AES-256
 
     @staticmethod
-    def encrypt_aes(data, key):
-        try:
-            cipher = AES.new(key, AES.MODE_CBC)
-            print(f'data len :{len(data)}')
-            ciphertext = cipher.encrypt(pad(data, AES.block_size))
-        except Exception as e:
-            print(e)
-            return
-
+    def encrypt_aes(data, key, iv):
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        ciphertext = cipher.encrypt(pad(data, AES.block_size))
         return ciphertext
-
-    @staticmethod
-    def decrypt_aes(ciphertext, key):
-        iv = ciphertext[:AES.block_size]
-        ciphertext = ciphertext[AES.block_size:]
-        cipher = AES.new(key, AES.MODE_CBC)
-        decrypted_data = unpad(cipher.decrypt(ciphertext), AES.block_size)
-        return decrypted_data.decode()
-
-    @staticmethod
-    def derive_key(password):
-        hash_object = SHA256.new(data=password.encode())
-        return hash_object.digest()
 
     @staticmethod
     def remove_null_termination(string: str):
