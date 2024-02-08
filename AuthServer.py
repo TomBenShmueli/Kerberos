@@ -1,3 +1,5 @@
+import base64
+import time
 from datetime import datetime
 import os
 import selectors
@@ -9,10 +11,10 @@ from typing import Any
 
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
+from Crypto.Util.Padding import pad, unpad
 from Crypto.Hash import SHA256
 from logging import Logger
 import queue
-
 
 logger = Logger("")
 
@@ -24,9 +26,16 @@ class ClientFauxDB:
 
     def clients_write_data(self, user_id, user_name, pw_hash, last_seen):
         with open(self.file_path, 'a') as file:
-            file.write(f"'\n{user_id}:{user_name}:{pw_hash}:{last_seen}")
+            file.write(f"{user_id}:{user_name}:{pw_hash}:{last_seen}\n")
 
-    def clients_boot_read_data(self, file_path):
+        new_data_entry = {'ID': user_id,
+                          'Name': user_name,
+                          'PasswordHash': pw_hash,
+                          'LastSeen': last_seen}
+        self.clients_data.append(new_data_entry)
+
+    @staticmethod
+    def clients_boot_read_data(file_path):
         if not os.path.exists("clients"):  # Clients file missing
             logger.error(f"Client file cannot be found. Defaulting to empty dataset...")
             return []
@@ -40,25 +49,39 @@ class ClientFauxDB:
                 # parse data from the following format ID:Name:PasswordHash:LastSeen to objects for faster performance
                 clients_data = []
                 for rawData in clients_raw_data:
-                    rawDataSubString = rawData.split(':')  # assuming data integrity from file
-                    newDataEntry = {'ID': rawDataSubString[0],
-                                    'Name': rawDataSubString[1],
-                                    'PasswordHash': rawDataSubString[2],
-                                    'LastSeen': rawDataSubString[3]}
-                    clients_data.append(newDataEntry)
+                    raw_data_sub_string = rawData.split(':')  # assuming data integrity from file
+                    new_data_entry = {'ID': raw_data_sub_string[0],
+                                      'Name': raw_data_sub_string[1],
+                                      'PasswordHash': raw_data_sub_string[2],
+                                      'LastSeen': raw_data_sub_string[3]}
+                    clients_data.append(new_data_entry)
                 return clients_data
         except Exception as e:
             logger.error(f'Failed to read from faux DB' + e)
             return []
 
-    def is_client_exists(self, client_username):
+    def is_username_exists(self, username):
         if not self.clients_data:
             return False
         else:
             for client in self.clients_data:
-                if client["Name"] == client_username:
+                if client["Name"] == username:
                     return True
             return False
+
+    def is_id_exists(self, id):
+        if not self.clients_data:
+            return False
+        else:
+            for client in self.clients_data:
+                if str(client["ID"]) == id.strip():
+                    return True
+            return False
+
+    def get_password(self, id):
+        for client in self.clients_data:
+            if str(client["ID"]) == id:
+                return client["PasswordHash"]
 
 
 clients_db = ClientFauxDB('clients')
@@ -160,7 +183,7 @@ class AuthServer:
             recv_data = sock.recv(4096)  # 4kb buffer size
             print(recv_data)
             #  recv_data contains the request data and the header to redirect request to the correct server function
-            request_headers = struct.unpack("<16sbHI", recv_data[:23])
+            request_headers = struct.unpack("<16sBHI", recv_data[:23])
             request_code = request_headers[2]
             print(request_headers)
             #  Parse data and store in a variable
@@ -168,7 +191,7 @@ class AuthServer:
                 payload = struct.unpack("<255s255s", recv_data[23:])
                 return self.register_new_client(request_headers, payload)
             elif request_code == RequestCode.CLIENT_REQUEST_AES_KEY_FOR_SERVER_MSG.value:
-                return self.generate_key_and_ticket(sock, recv_data)
+                return self.generate_key_and_ticket(request_headers, recv_data[23:])
 
         except ConnectionResetError:
             logger.debug("An existing connection was forcibly closed by the remote host")
@@ -193,26 +216,83 @@ class AuthServer:
                 print(e)
                 raise Exception("Could not have sent Message")
 
-    def generate_key_and_ticket(self, server_socket, recv_data):
+    def generate_key_and_ticket(self, headers, payload):
+
+        client_id = str(uuid.UUID(bytes=headers[0]))
+        payload = struct.unpack("<16sQ", payload)
+        # todo change so that we read the server id from srv.info
+        server_id = payload[0].decode()
+        nonce = payload[1]
+        iv = self.generate_iv()
 
         # Server sends a session key
-        session_key = self.generate_key()
-        self.socket.send(session_key)
+        aes_key = self.generate_key()
 
         # Server receives authentication request and performs a lookup on the user
-        username = struct.unpack("<255s255s", recv_data[23:])
-        if clients_db.is_client_exists(username):
-            # Step 3: Server sends a TGT (Ticket-Granting Ticket)
-            tgt = SHA256.new(data=session_key.encode()).digest()
-            self.send_msg(str(tgt))
+        if clients_db.is_id_exists(client_id):
 
-            # Step 4: Server receives a request for a service ticket
-            # service_name = client_socket.recv(1024).decode()
-            #
-            # # Step 5: Server sends a service ticket
-            # service_ticket = self.encrypt(session_key, f"{service_name}:{session_key.hex()}")
-            # client_socket.send(service_ticket[0])  # Sending ciphertext
-            # client_socket.send(service_ticket[1])  # Sending tag
+            try:
+                client_id_field = struct.pack("<16s", uuid.UUID(client_id).bytes)
+                encrypted_key_field = struct.pack("<16s", iv) + self.create_key_field(aes_key, client_id, nonce, iv)
+                ticket_field = self.create_ticket_field(client_id, server_id, iv, aes_key)
+
+                payload_size = len(client_id_field) + len(encrypted_key_field) + len(ticket_field)
+                headers_response = struct.pack(f"<BHI", self.VERSION, RESPONSE.SYMMETRIC_KEY_SUCCESS.value,
+                                               payload_size)
+                response_payload = client_id_field + encrypted_key_field + ticket_field
+
+                response = headers_response + response_payload
+                print("sent client AES encryption key successfully")
+                self.messages.put(response)
+            except Exception as e:
+                print(e)
+        else:
+            print("client id not exists")
+            # Todo should return message with fail code
+            pass
+
+    def create_key_field(self, aes_key, client_id, nonce, iv):
+        client_hashed_password = clients_db.get_password(client_id)
+        client_hashed_password = bytes.fromhex(client_hashed_password)
+
+        data = nonce.to_bytes(8, 'little')
+        encrypted_nonce = self.encrypt_aes(data, client_hashed_password, iv)
+        encrypted_aes_key = self.encrypt_aes(bytes(aes_key), client_hashed_password, iv)
+
+        print(f"bytes fo aes key:,{bytes(aes_key)}")
+        # print(f"decrypt aes key: {self.decrypt_aes(encrypted_aes_key, client_hashed_password, iv)}")
+
+        return struct.pack("<16s48s", encrypted_nonce, encrypted_aes_key)
+
+    def create_ticket_field(self, client_id, server_id, iv, aes_key):
+
+        current_timestamp = int(time.time())
+
+        # Add 3600 seconds (1 hour) to the current timestamp
+        expiration_timestamp = current_timestamp + 3600
+
+        # Todo should make new iv for msg server
+        # Todo change server id it's not coming as it should from the client
+        part_1 = struct.pack("<B16s16sQ16s", self.VERSION, client_id.encode(), server_id.encode(),
+                             current_timestamp, iv)
+
+        # To read from msg.info
+        hashed_msg_server_password: bytes
+        with open("msg.info", "r") as msg_file:
+            msg_file.readline()
+            msg_file.readline()
+            line = msg_file.readline()
+            hashed_msg_server_password = base64.b64decode(line)
+
+        encrypted_aes_key = self.encrypt_aes(bytes(aes_key), hashed_msg_server_password, iv)
+        time_expiration_bytes = expiration_timestamp.to_bytes((expiration_timestamp.bit_length() + 7) // 8, 'little')
+        encrypted_expiration_time = self.encrypt_aes(time_expiration_bytes, hashed_msg_server_password, iv)
+
+        part_2 = struct.pack("<48s24s", encrypted_aes_key, encrypted_expiration_time)
+
+        print("ticket bytes")
+        print(part_1 + part_2)
+        return part_1 + part_2
 
     def register_new_client(self, request_headers, payload):
         new_uuid = uuid.uuid4()
@@ -222,11 +302,11 @@ class AuthServer:
         password = self.remove_null_termination(payload[1].decode("ascii"))
         password = SHA256.new(password.encode()).hexdigest()
 
-        if not clients_db.is_client_exists(username):
+        if not clients_db.is_username_exists(username):
             try:
                 clients_db.clients_write_data(new_uuid, username, password, datetime.now())
                 response = struct.pack(f"<bHI16s", self.VERSION, RESPONSE.AUTH_SERVER_REGISTRATION_SUCCESS.value,
-                                       4, str(new_uuid).encode("ascii"))
+                                       4, new_uuid.bytes)
                 logger.info(f'User {username} was registered successfully.')
                 self.messages.put(response)
             except Exception as e:  # db write failure
@@ -243,29 +323,23 @@ class AuthServer:
             return self.messages.put(response)
 
     @staticmethod
+    def generate_iv():
+        return get_random_bytes(16)  # 16 bytes for IV
+
+    @staticmethod
     def generate_key():
-        return get_random_bytes(32)  # 32 bytes for AES-128
+        return get_random_bytes(32)  # 32 bytes for AES-256
 
     @staticmethod
-    def encrypt(key, data):
-        cipher = AES.new(key, AES.MODE_EAX)
-        ciphertext, tag = cipher.encrypt_and_digest(data.encode())
-        return ciphertext, tag
-
-    @staticmethod
-    def decrypt(key, ciphertext, tag):
-        cipher = AES.new(key, AES.MODE_EAX)
-        plaintext = cipher.decrypt_and_verify(ciphertext, tag)
-        return plaintext.decode()
-
-    @staticmethod
-    def derive_key(password):
-        hash_object = SHA256.new(data=password.encode())
-        return hash_object.digest()
+    def encrypt_aes(data, key, iv):
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        ciphertext = cipher.encrypt(pad(data, AES.block_size))
+        return ciphertext
 
     @staticmethod
     def remove_null_termination(string: str):
         return string[:string.find("\\0")]
+
 
 if __name__ == '__main__':
     server = AuthServer()

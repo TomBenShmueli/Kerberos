@@ -4,7 +4,24 @@ import selectors
 import socket
 from logging import Logger
 
+from Crypto.Random import get_random_bytes
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+from Crypto.Hash import SHA256
+
 logger = Logger("")
+
+
+def encrypt_aes(data, key):
+    cipher = AES.new(key, AES.MODE_CBC, get_random_bytes(AES.block_size))
+    ciphertext = cipher.encrypt(pad(data.encode(), AES.block_size))
+    return cipher.iv + ciphertext
+
+
+def decrypt_aes(ciphertext, key, iv):
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    decrypted_data = unpad(cipher.decrypt(ciphertext), AES.block_size)
+    return decrypted_data
 
 
 class MessageServer:
@@ -61,6 +78,7 @@ class MessageServer:
         conn.setblocking(False)
         events = selectors.EVENT_READ | selectors.EVENT_WRITE
         self.sel.register(conn, events, data=addr)
+
     def service_connection(self, key, mask):
         """
         multiplexing between the open sockets and services them.
@@ -74,8 +92,6 @@ class MessageServer:
         # send data to socket
         if mask & selectors.EVENT_WRITE:
             pass
-
-
 
     def receive_data(self, key):
         sock: socket.socket = key.fileobj
