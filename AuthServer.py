@@ -116,7 +116,7 @@ class AuthServer:
     def __init__(self):
         self.data = None
         if not os.path.exists("port.info"):
-            logger.error(f"Port.info file doesn't exists, defaults to port 1256")
+            logger.error(f"Port.info file doesn't exist, defaults to port 1256")
         else:
             with open("port.info", 'r') as file:
                 self.PORT = file.readline()
@@ -247,7 +247,7 @@ class AuthServer:
             except Exception as e:
                 print(e)
         else:
-            print("client id not exists")
+            print("client id not exist")
             # Todo should return message with fail code
             pass
 
