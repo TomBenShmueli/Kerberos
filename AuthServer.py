@@ -11,7 +11,7 @@ from typing import Any
 
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
-from Crypto.Util.Padding import pad, unpad
+from Crypto.Util.Padding import pad
 from Crypto.Hash import SHA256
 from logging import Logger
 import queue
@@ -234,10 +234,10 @@ class AuthServer:
             try:
                 client_id_field = struct.pack("<16s", uuid.UUID(client_id).bytes)
                 encrypted_key_field = struct.pack("<16s", iv) + self.create_key_field(aes_key, client_id, nonce, iv)
-                ticket_field = self.create_ticket_field(client_id, server_id, iv, aes_key)
+                ticket_field = self.create_ticket_field(client_id, server_id, aes_key)
 
                 payload_size = len(client_id_field) + len(encrypted_key_field) + len(ticket_field)
-                headers_response = struct.pack(f"<BHI", self.VERSION, RESPONSE.SYMMETRIC_KEY_SUCCESS.value,
+                headers_response = struct.pack("<BHI", self.VERSION, RESPONSE.SYMMETRIC_KEY_SUCCESS.value,
                                                payload_size)
                 response_payload = client_id_field + encrypted_key_field + ticket_field
 
@@ -255,7 +255,7 @@ class AuthServer:
         client_hashed_password = clients_db.get_password(client_id)
         client_hashed_password = bytes.fromhex(client_hashed_password)
 
-        data = nonce.to_bytes(8, 'little')
+        data = int.to_bytes(nonce, 8, "little")
         encrypted_nonce = self.encrypt_aes(data, client_hashed_password, iv)
         encrypted_aes_key = self.encrypt_aes(bytes(aes_key), client_hashed_password, iv)
 
@@ -264,29 +264,33 @@ class AuthServer:
 
         return struct.pack("<16s48s", encrypted_nonce, encrypted_aes_key)
 
-    def create_ticket_field(self, client_id, server_id, iv, aes_key):
+    def create_ticket_field(self, client_id, server_id, aes_key):
 
         current_timestamp = int(time.time())
 
         # Add 3600 seconds (1 hour) to the current timestamp
         expiration_timestamp = current_timestamp + 3600
 
-        # Todo should make new iv for msg server
+        ticket_iv = self.generate_iv()
+
         # Todo change server id it's not coming as it should from the client
         part_1 = struct.pack("<B16s16sQ16s", self.VERSION, client_id.encode(), server_id.encode(),
-                             current_timestamp, iv)
+                             current_timestamp, ticket_iv)
 
         # To read from msg.info
         hashed_msg_server_password: bytes
         with open("msg.info", "r") as msg_file:
             msg_file.readline()
             msg_file.readline()
+            msg_file.readline()
             line = msg_file.readline()
             hashed_msg_server_password = base64.b64decode(line)
 
-        encrypted_aes_key = self.encrypt_aes(bytes(aes_key), hashed_msg_server_password, iv)
-        time_expiration_bytes = expiration_timestamp.to_bytes((expiration_timestamp.bit_length() + 7) // 8, 'little')
-        encrypted_expiration_time = self.encrypt_aes(time_expiration_bytes, hashed_msg_server_password, iv)
+        print(f"ticket iv {ticket_iv}")
+        encrypted_aes_key = self.encrypt_aes(bytes(aes_key), hashed_msg_server_password, ticket_iv)
+
+        time_expiration_bytes = int.to_bytes(expiration_timestamp, 8, "little")
+        encrypted_expiration_time = self.encrypt_aes(time_expiration_bytes, hashed_msg_server_password, ticket_iv)
 
         part_2 = struct.pack("<48s24s", encrypted_aes_key, encrypted_expiration_time)
 

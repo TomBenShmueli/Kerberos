@@ -16,16 +16,20 @@ from Crypto.Hash import SHA256
 logger = Logger("")
 
 
-def encrypt_aes(data, key):
-    cipher = AES.new(key, AES.MODE_CBC, get_random_bytes(AES.block_size))
-    ciphertext = cipher.encrypt(pad(data.encode(), AES.block_size))
-    return cipher.iv + ciphertext
+def encrypt_aes(data, key, iv):
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    ciphertext = cipher.encrypt(pad(data, AES.block_size))
+    return ciphertext
 
 
 def decrypt_aes(ciphertext, key, iv):
     cipher = AES.new(key, AES.MODE_CBC, iv)
     decrypted_data = unpad(cipher.decrypt(ciphertext), AES.block_size)
     return decrypted_data
+
+
+def generate_iv():
+    return get_random_bytes(16)  # 16 bytes for IV
 
 
 def _is_socket_connected(s: socket.socket) -> bool:
@@ -79,6 +83,7 @@ class Message:
     @staticmethod
     def register_auth_server(version, username, password):
         # registering at auth server payload is 2 times 256
+        # Todo notice this
         payload_size = 512
 
         username_with_null_char = username + "\\0"
@@ -90,19 +95,39 @@ class Message:
                                    password_with_null_char.encode("ascii"))).get_bytes()
 
     @staticmethod
-    def request_aes_key(client_id, version, message_server_address, nonce):
+    def request_aes_key_from_auth(client_id, version, server_id, nonce):
         payload_size = 24
         return Message(client_id, version, CODE.CLIENT_REQUEST_AES_KEY_FOR_SERVER_MSG.value, payload_size,
-                       struct.pack("<16s8s", message_server_address.encode("ascii"), nonce)).get_bytes()
+                       struct.pack("<16s8s", server_id.bytes, nonce)).get_bytes()
+
+    @staticmethod
+    def send_aes_key_to_msg_server(key, ticket, iv, version: int, client_id: uuid.UUID, server_id: uuid.UUID):
+        def create_authenticator():
+            encrypt_version = encrypt_aes(int.to_bytes(version, 1, "little"), key, iv)
+            encrypt_client_id = encrypt_aes(client_id.bytes, key, iv)
+            encrypt_server_id = encrypt_aes(server_id.bytes, key, iv)
+
+            current_timestamp = int(time.time())
+            encrypt_creation_time = encrypt_aes(int.to_bytes(current_timestamp, 8, "little"), key, iv)
+
+            return struct.pack("<16s16s32s32s16s", iv, encrypt_version, encrypt_client_id, encrypt_server_id,
+                               encrypt_creation_time)
+
+        return create_authenticator() + ticket
 
 
 class Client:
-    auth_server_address = "127.0.0.1"
-    auth_server_port = 1256
+    # Todo check that the time is correct
+    # Todo check that the nonce is correct
+    # Todo check input in general
 
-    message_server_address = "127.0.0.1"
-    message_server_port = 1256
-    VERSION = 24
+    version = 24
+
+    auth_server_address: str
+    auth_server_port: int
+
+    message_server_address: str
+    message_server_port: int
 
     socket: socket = None
     is_connected: bool = False
@@ -112,6 +137,11 @@ class Client:
     username: str
     password: str = ""
     client_id: uuid.UUID
+
+    # as we understood from questions in the forum if we have only 1 msg server then there is no need for
+    # a server id therefor an empty id is put in
+    server_id: uuid.UUID = uuid.UUID(bytes=b'\x00' * 16)
+
     nonce: bytes
 
     symmetric_key_for_msg_server: bytes
@@ -122,7 +152,7 @@ class Client:
         self.read_client_info()
 
     def register_with_auth_server(self, username, password):
-        msg_bytes = Message.register_auth_server(self.VERSION, username, password)
+        msg_bytes = Message.register_auth_server(self.version, username, password)
         return self.send_msg(msg_bytes)
 
     def get_login_details_from_user(self):
@@ -139,7 +169,7 @@ class Client:
     def request_aes_key(self):
         self.nonce = generate_nonce(8)
         return self.send_msg(
-            Message.request_aes_key(self.client_id, self.VERSION, self.message_server_address, self.nonce))
+            Message.request_aes_key_from_auth(self.client_id, self.version, self.server_id, self.nonce))
 
     def check_connection(self):
         self.is_connected = _is_socket_connected(self.socket)
@@ -180,7 +210,6 @@ class Client:
             sock.close()
             # start connection to msg server.
             self.connect_to_msg_server()
-
 
     def read_servers_info(self) -> bool:
         if not os.path.exists("srv.info"):
@@ -272,17 +301,26 @@ class Client:
             key = SHA256.new(self.password.encode()).digest()
 
             self.symmetric_key_for_msg_server = decrypt_aes(payload[aes_key_index], key, iv)
-            self.ticket = struct.unpack("<B16s16sQ16s48s24s", raw_data[ticket_size:])
+            self.ticket = raw_data[ticket_size:]
+            # self.ticket = struct.unpack("<B16s16sQ16s48s24s", raw_data[ticket_size:])
 
             # Todo check nonce match the nonce that client sent.
-
-            print(f"payload 3 :{payload[3]}")
-            print(f"decrepted key: : {key}")
 
             self.key_request_waiting = False
 
     def connect_to_msg_server(self):
-        pass
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket = sock
+        sock.connect((self.message_server_address, self.message_server_port))
+        self.check_connection()
+
+        print(f"symmetric key with server msg: {self.symmetric_key_for_msg_server}")
+
+        authenticator_iv = generate_iv()
+        msg = Message.send_aes_key_to_msg_server(self.symmetric_key_for_msg_server, self.ticket, authenticator_iv,
+                                                 self.version, self.client_id,
+                                                 self.server_id)
+        self.socket.send(msg)
 
 
 if __name__ == '__main__':

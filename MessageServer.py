@@ -1,13 +1,13 @@
+import base64
 import os
-import pickle
 import selectors
 import socket
+import struct
 from logging import Logger
 
 from Crypto.Random import get_random_bytes
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
-from Crypto.Hash import SHA256
 
 logger = Logger("")
 
@@ -29,7 +29,7 @@ class MessageServer:
     PORT = 65432
     name: str
     uuid: str
-    symmetric_key: str
+    servers_password: bytes
 
     sel = selectors.DefaultSelector()
 
@@ -38,10 +38,15 @@ class MessageServer:
             logger.error(f"msg.info file doesn't exists")
         else:
             with open("msg.info", 'r') as file:
-                self.PORT = int(file.readline())
-                self.name = file.readline()
-                self.uuid = file.readline()
-                self.symmetric_key = file.readline()
+                server_port = file.readline()
+                self.HOST = server_port[:server_port.find(":")]
+                self.PORT = int(server_port[server_port.find(":") + 1:])
+
+                # strips the \n
+                self.name = file.readline()[:-1]
+                self.uuid = file.readline()[:-1]
+                password = file.readline()
+                self.servers_password = base64.b64decode(password)
 
     def start_server(self):
         """
@@ -99,6 +104,8 @@ class MessageServer:
 
         try:
             recv_data = sock.recv(4096)
+            if recv_data:
+                self.analyze_data(recv_data)
         except ConnectionResetError:
             logger.debug("An existing connection was forcibly closed by the remote HOST")
             self.sel.unregister(sock)
@@ -107,7 +114,15 @@ class MessageServer:
         if not recv_data:
             return
 
-        print(pickle.loads(recv_data))
+    def analyze_data(self, recv_data):
+        print(recv_data)
+        authenticator = struct.unpack("<16s16s32s32s16s", recv_data[:112])
+        ticket = struct.unpack("<B16s16sQ16s48s24s", recv_data[112:])
+
+        print(ticket[4])
+        aes_key = decrypt_aes(ticket[5], self.servers_password, ticket[4])
+        print(f"symmetric key with client : {aes_key}")
+        pass
 
 
 if __name__ == '__main__':
