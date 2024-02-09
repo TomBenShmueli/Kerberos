@@ -292,7 +292,7 @@ class AuthServer:
         time_expiration_bytes = int.to_bytes(expiration_timestamp, 8, "little")
         encrypted_expiration_time = self.encrypt_aes(time_expiration_bytes, hashed_msg_server_password, ticket_iv)
 
-        part_2 = struct.pack("<48s24s", encrypted_aes_key, encrypted_expiration_time)
+        part_2 = struct.pack("<48s16s", encrypted_aes_key, encrypted_expiration_time)
 
         print("ticket bytes")
         print(part_1 + part_2)
@@ -309,7 +309,7 @@ class AuthServer:
         if not clients_db.is_username_exists(username):
             try:
                 clients_db.clients_write_data(new_uuid, username, password, datetime.now())
-                response = struct.pack(f"<bHI16s", self.VERSION, RESPONSE.AUTH_SERVER_REGISTRATION_SUCCESS.value,
+                response = struct.pack(f"<BHI16s", self.VERSION, RESPONSE.AUTH_SERVER_REGISTRATION_SUCCESS.value,
                                        4, new_uuid.bytes)
                 logger.info(f'User {username} was registered successfully.')
                 self.messages.put(response)

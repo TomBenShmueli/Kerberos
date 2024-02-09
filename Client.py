@@ -49,6 +49,9 @@ class CODE(Enum):
     CLIENT_REQUEST_REGISTER_AUTH_CODE = 1024
     CLIENT_REQUEST_AES_KEY_FOR_SERVER_MSG = 1027
 
+    CLIENT_SENDING_KEY_TO_SERVER_MSG = 1028
+    CLIENT_SENDING_MSG_TO_SERVER_MSG = 1029
+
     #     Message server
     ACKE_ACCEPTED_SYMMETRIC_KEY = 1604
     ACKE_ACCEPTED_MESSAGE = 1605
@@ -101,19 +104,34 @@ class Message:
                        struct.pack("<16s8s", server_id.bytes, nonce)).get_bytes()
 
     @staticmethod
-    def send_aes_key_to_msg_server(key, ticket, iv, version: int, client_id: uuid.UUID, server_id: uuid.UUID):
+    def send_aes_key_to_msg_server(key, ticket, version: int, client_id: uuid.UUID, server_id: uuid.UUID, request_code):
         def create_authenticator():
-            encrypt_version = encrypt_aes(int.to_bytes(version, 1, "little"), key, iv)
-            encrypt_client_id = encrypt_aes(client_id.bytes, key, iv)
-            encrypt_server_id = encrypt_aes(server_id.bytes, key, iv)
+            authenticator_iv = generate_iv()
+            encrypt_version = encrypt_aes(int.to_bytes(version, 1, "little"), key, authenticator_iv)
+            encrypt_client_id = encrypt_aes(client_id.bytes, key, authenticator_iv)
+            encrypt_server_id = encrypt_aes(server_id.bytes, key, authenticator_iv)
 
             current_timestamp = int(time.time())
-            encrypt_creation_time = encrypt_aes(int.to_bytes(current_timestamp, 8, "little"), key, iv)
+            encrypt_creation_time = encrypt_aes(int.to_bytes(current_timestamp, 8, "little"), key, authenticator_iv)
 
-            return struct.pack("<16s16s32s32s16s", iv, encrypt_version, encrypt_client_id, encrypt_server_id,
+            return struct.pack("<16s16s32s32s16s", authenticator_iv, encrypt_version, encrypt_client_id,
+                               encrypt_server_id,
                                encrypt_creation_time)
 
-        return create_authenticator() + ticket
+        payload = create_authenticator() + ticket
+        return Message(client_id, version, request_code, len(payload), payload).get_bytes()
+
+    @staticmethod
+    def encrypted_message(client_id, version, code, message, key):
+        def create_message():
+            message_iv = generate_iv()
+            encrypted_msg = encrypt_aes(message, key, message_iv)
+            message_size = len(encrypted_msg)
+            return struct.pack(f"<I16s{message_size}s", message_size, message_iv, encrypted_msg)
+
+        msg = create_message()
+        payload_size = len(msg)
+        return Message(client_id, version, code, payload_size, msg).get_bytes()
 
 
 class Client:
@@ -180,36 +198,44 @@ class Client:
         sock.connect((self.auth_server_address, self.auth_server_port))
         self.check_connection()
 
-        # asks user for login details if not registered
         if not os.path.exists("me.info"):
-            self.get_login_details_from_user()
-            # First login Register at auth server
-            self.register_with_auth_server(self.username, self.password)
-
-            # endless loop of listening till server response to registration
-            while self.registration_waiting:
-                if self.is_connected:
-                    client.recv_messages()
-                else:
-                    time.sleep(0.1)
-
-        # get the users password again
+            self.request_registration_from_auth()
+        # if no need to register get the users password again
         else:
             self.password = input("Enter Password:")
 
+        # blocking function until server responds
+        self.request_key_from_auth(sock)
+
+        # start connection to msg server.
+        self.connect_to_msg_server()
+
+        self.get_user_msg()
+
+    def request_registration_from_auth(self):
+        # asks user for login details if not registered
+        self.get_login_details_from_user()
+        # First login Register at auth server
+        self.register_with_auth_server(self.username, self.password)
+        # endless loop of listening till server response to registration
+        while self.registration_waiting:
+            if self.is_connected:
+                self.recv_messages()
+            else:
+                time.sleep(0.1)
+
+    def request_key_from_auth(self, sock):
         if self.request_aes_key() > 0:
             print("Key request sent to server...")
             time.sleep(0.5)
             while self.key_request_waiting:
                 if self.is_connected:
-                    client.recv_messages()
+                    self.recv_messages()
                 else:
                     time.sleep(0.1)
 
             # closes connection with auth server.
             sock.close()
-            # start connection to msg server.
-            self.connect_to_msg_server()
 
     def read_servers_info(self) -> bool:
         if not os.path.exists("srv.info"):
@@ -294,7 +320,7 @@ class Client:
 
         if response_code == RESPONSE.SYMMETRIC_KEY_SUCCESS.value:
             # unpacks the response from server
-            payload = struct.unpack("<16s16s16s48sB16s16sQ16s48s24s", raw_data[headers_size:])
+            payload = struct.unpack("<16s16s16s48sB16s16sQ16s48s16s", raw_data[headers_size:])
             iv = payload[iv_index]
 
             # gets the password hash to open the encryption
@@ -316,11 +342,18 @@ class Client:
 
         print(f"symmetric key with server msg: {self.symmetric_key_for_msg_server}")
 
-        authenticator_iv = generate_iv()
-        msg = Message.send_aes_key_to_msg_server(self.symmetric_key_for_msg_server, self.ticket, authenticator_iv,
-                                                 self.version, self.client_id,
-                                                 self.server_id)
+        msg = Message.send_aes_key_to_msg_server(self.symmetric_key_for_msg_server, self.ticket, self.version,
+                                                 self.client_id, self.server_id,
+                                                 CODE.CLIENT_SENDING_KEY_TO_SERVER_MSG.value)
         self.socket.send(msg)
+
+    def get_user_msg(self):
+        while True:
+            message = input("Enter your message")
+            msg = Message.encrypted_message(self.client_id, self.version,
+                                            CODE.CLIENT_SENDING_MSG_TO_SERVER_MSG.value,
+                                            message.encode(), self.symmetric_key_for_msg_server)
+            self.socket.send(msg)
 
 
 if __name__ == '__main__':
