@@ -1,6 +1,7 @@
 import base64
 import datetime
 import os
+import queue
 import selectors
 import socket
 import struct
@@ -18,6 +19,11 @@ class CODE(Enum):
     CLIENT_SENDING_KEY_TO_SERVER_MSG = 1028
     CLIENT_SENDING_MSG_TO_SERVER_MSG = 1029
 
+    AES_KEY_RECEIVED = 1604
+    MSG_RECEIVED = 1605
+
+    GENERAL_ERROR = 1609
+
 
 def encrypt_aes(data, key):
     cipher = AES.new(key, AES.MODE_CBC, get_random_bytes(AES.block_size))
@@ -31,17 +37,55 @@ def decrypt_aes(ciphertext, key, iv):
     return decrypted_data
 
 
+class Message:
+    version: int
+    code: int
+    payload_size: int
+    payload: any
+
+    def __init__(self, version: int, code: int, payload_size: int, payload):
+        self.version = version
+        self.code = code
+        self.payload_size = payload_size
+        self.payload = payload
+
+    def get_bytes(self):
+        """
+        turns the class into packed bytes
+        :return: returns the whole message packed to bytes with header & payload
+        """
+        if not self.payload:
+            return struct.pack("<BHI", self.version, self.code,
+                               self.payload_size)
+        else:
+            return struct.pack("<BHI", self.version, self.code,
+                               self.payload_size) + self.payload
+
+    @staticmethod
+    def symmetric_key_confirmation(version):
+        return Message(version, CODE.AES_KEY_RECEIVED.value, 0, None).get_bytes()
+
+    @staticmethod
+    def message_received(version):
+        return Message(version, CODE.MSG_RECEIVED.value, 0, None).get_bytes()
+
+
 class MessageServer:
-    HOST = "127.0.0.1"
-    PORT = 65432
+    HOST: str
+    PORT: int
     name: str
     uuid: str
     servers_password: bytes
+
+    version = 24
 
     # todo change users data
     users_data = []
 
     sel = selectors.DefaultSelector()
+
+    messages = queue.Queue()
+    socket: socket = None
 
     def __init__(self):
         if not os.path.exists("msg.info"):
@@ -88,6 +132,7 @@ class MessageServer:
         accepting connection requests and adding them to the socket_info data structure
         :param sock: the socket itself that was accepted.
         """
+        self.socket = sock
         conn: socket.socket
         conn, addr = sock.accept()
         conn.setblocking(False)
@@ -101,12 +146,14 @@ class MessageServer:
         :param mask: contains data about the socket.
         """
 
+        sock = key.fileobj
         # read from socket
         if mask & selectors.EVENT_READ:
             self.receive_data(key)
         # send data to socket
-        if mask & selectors.EVENT_WRITE:
-            pass
+        if mask & selectors.EVENT_WRITE and not self.messages.empty():
+            message = self.messages.get(False)
+            sock.send(message)
 
     def receive_data(self, key):
         sock: socket.socket = key.fileobj
@@ -125,6 +172,10 @@ class MessageServer:
             return
 
     def analyze_data(self, recv_data):
+        """
+        analyze the data that is received and acts as an api gateway
+        :param recv_data: the data that received
+        """
         # Todo check that all the values in the ticket and auth are all right
         try:
             header = struct.unpack("<16sBHI", recv_data[:23])
@@ -134,17 +185,18 @@ class MessageServer:
                 authenticator = struct.unpack("<16s16s32s32s16s", recv_data[23:135])
                 ticket = struct.unpack("<B16s16sQ16s48s16s", recv_data[135:])
 
-                print(ticket[4])
                 aes_key = decrypt_aes(ticket[5], self.servers_password, ticket[4])
                 expiration_timestamp = decrypt_aes(ticket[6], self.servers_password, ticket[4])
                 expiration_timestamp = int.from_bytes(expiration_timestamp, "little")
-                print(f"symmetric key with client : {aes_key}")
                 expiration_timestamp = datetime.datetime.fromtimestamp(expiration_timestamp)
-                print(f"{expiration_timestamp}")
+                # print(f"{expiration_timestamp}")
 
                 # todo change users data
                 self.users_data.append({"key": aes_key})
 
+                # confirm to client that the message received
+                print("Received ticket & auth from client ")
+                self.messages.put(Message.symmetric_key_confirmation(self.version))
             if message_code == CODE.CLIENT_SENDING_MSG_TO_SERVER_MSG.value:
                 payload = struct.unpack("<I16s", recv_data[23:43])
                 msg_size = payload[0]
@@ -155,9 +207,11 @@ class MessageServer:
                 key = self.users_data[0]["key"]
                 print(decrypt_aes(message[0], key, iv).decode())
 
+                # send messages back to confirm the message received
+                self.messages.put(Message.message_received(self.version))
+
         except Exception as e:
             print(e)
-        pass
 
 
 if __name__ == '__main__':

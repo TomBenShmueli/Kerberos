@@ -1,4 +1,3 @@
-import hashlib
 import os
 import socket
 import time
@@ -53,8 +52,8 @@ class CODE(Enum):
     CLIENT_SENDING_MSG_TO_SERVER_MSG = 1029
 
     #     Message server
-    ACKE_ACCEPTED_SYMMETRIC_KEY = 1604
-    ACKE_ACCEPTED_MESSAGE = 1605
+    MSG_SERVER_ACCEPTED_SYMMETRIC_KEY = 1604
+    MSG_SERVER_ACCEPTED_MESSAGE = 1605
     GENERAL_ERROR_IN_SERVER = 1609
 
 
@@ -80,13 +79,16 @@ class Message:
         self.payload = payload
 
     def get_bytes(self):
+        """
+        turns the class into packed bytes
+        :return: returns the whole message packed to bytes with header & payload
+        """
         return struct.pack("<16sBHI", self.clientID.bytes, self.version, self.code,
                            self.payload_size) + self.payload
 
     @staticmethod
     def register_auth_server(version, username, password):
         # registering at auth server payload is 2 times 256
-        # Todo notice this
         payload_size = 512
 
         username_with_null_char = username + "\\0"
@@ -135,9 +137,8 @@ class Message:
 
 
 class Client:
-    # Todo check that the time is correct
-    # Todo check that the nonce is correct
     # Todo check input in general
+    # Todo check that it's multithreaded
 
     version = 24
 
@@ -149,6 +150,8 @@ class Client:
 
     socket: socket = None
     is_connected: bool = False
+
+    # busy listening variables to wait for a response
     registration_waiting: bool = True
     key_request_waiting: bool = True
 
@@ -217,6 +220,7 @@ class Client:
         self.get_login_details_from_user()
         # First login Register at auth server
         self.register_with_auth_server(self.username, self.password)
+        print("\nRegistration Request sent to server")
         # endless loop of listening till server response to registration
         while self.registration_waiting:
             if self.is_connected:
@@ -226,7 +230,7 @@ class Client:
 
     def request_key_from_auth(self, sock):
         if self.request_aes_key() > 0:
-            print("Key request sent to server...")
+            print("Key request sent to Auth server...")
             time.sleep(0.5)
             while self.key_request_waiting:
                 if self.is_connected:
@@ -259,6 +263,8 @@ class Client:
     def read_client_info(self) -> bool:
         if not os.path.exists("me.info"):
             logger.error("me info doesn't exists")
+            # to show the output before any print
+            time.sleep(0.01)
             return False
         else:
             with open("me.info", "r") as me_file:
@@ -272,12 +278,11 @@ class Client:
         try:
             raw_data = self.socket.recv(4096)
             if raw_data:
-                print(raw_data)
                 self.analyze_response(raw_data)
         except ConnectionResetError as e:
             logger.info("{}".format(e))
         except ConnectionAbortedError as e:
-            logger.info("connection was aborted by the software in your host machine")
+            logger.info(f"connection was aborted {e}")
 
     def send_msg(self, msg: str) -> int:
         if len(msg) < 4095:
@@ -293,8 +298,13 @@ class Client:
         self.is_connected = False
 
     def analyze_response(self, raw_data):
+        """
+        analyze the data that is received and acts as an api gateway
+        :param raw_data: the data that received
+        """
         headers_size = 7
         ticket_size = 103
+        nonce_index = 2
         aes_key_index = 3
         response_code_index = 1
 
@@ -326,13 +336,26 @@ class Client:
             # gets the password hash to open the encryption
             key = SHA256.new(self.password.encode()).digest()
 
-            self.symmetric_key_for_msg_server = decrypt_aes(payload[aes_key_index], key, iv)
-            self.ticket = raw_data[ticket_size:]
-            # self.ticket = struct.unpack("<B16s16sQ16s48s24s", raw_data[ticket_size:])
+            try:
+                self.symmetric_key_for_msg_server = decrypt_aes(payload[aes_key_index], key, iv)
+            except Exception as e:
+                logger.error(f"Error is your password correct? {e}, exiting")
+                exit(1)
 
-            # Todo check nonce match the nonce that client sent.
+            self.ticket = raw_data[ticket_size:]
+
+            # checks that the Nonce match the Nonce sent.
+            if self.nonce != decrypt_aes(payload[nonce_index], key, iv):
+                raise "server's Nonce is wrong, aborting"
 
             self.key_request_waiting = False
+
+        if response_code == CODE.MSG_SERVER_ACCEPTED_SYMMETRIC_KEY.value:
+            print("Message server received Symmetric key")
+        if response_code == CODE.MSG_SERVER_ACCEPTED_MESSAGE.value:
+            print("Message server printed your message")
+        if response_code == CODE.GENERAL_ERROR_IN_SERVER.value:
+            print("A General Error occurred in server")
 
     def connect_to_msg_server(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -340,8 +363,8 @@ class Client:
         sock.connect((self.message_server_address, self.message_server_port))
         self.check_connection()
 
-        print(f"symmetric key with server msg: {self.symmetric_key_for_msg_server}")
-
+        # sends the symmetric key to server message
+        print("\nSending Ticket & auth to message server")
         msg = Message.send_aes_key_to_msg_server(self.symmetric_key_for_msg_server, self.ticket, self.version,
                                                  self.client_id, self.server_id,
                                                  CODE.CLIENT_SENDING_KEY_TO_SERVER_MSG.value)
@@ -349,11 +372,14 @@ class Client:
 
     def get_user_msg(self):
         while True:
+            # checks if there is a message in the buffer form the server message
+            self.recv_messages()
             message = input("Enter your message")
             msg = Message.encrypted_message(self.client_id, self.version,
                                             CODE.CLIENT_SENDING_MSG_TO_SERVER_MSG.value,
                                             message.encode(), self.symmetric_key_for_msg_server)
             self.socket.send(msg)
+            time.sleep(0.1)
 
 
 if __name__ == '__main__':
