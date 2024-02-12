@@ -1,10 +1,5 @@
 # Q2: Dictionary attack script
 
-# From Wikipedia:
-# In cryptanalysis and computer security, a dictionary attack is an attack using a restricted subset of a keyspace
-# to defeat a cipher or authentication mechanism by trying to determine its decryption key or passphrase,
-# sometimes trying thousands or millions of likely possibilities often obtained from lists of past security breaches.
-
 # In this script, we will attempt to steal the AES symmetrical key
 # Step 1: Create a dictionary of common password variations
 # Step 2: Save the password hash received from the server as source(Commonly taken from data leaks containing pw hashes)
@@ -16,60 +11,67 @@
 
 import os
 from Crypto.Cipher import AES
-from Crypto.Hash import SHA256
-from logging import Logger
 from Crypto.Util.Padding import pad
 
-logger = Logger("")
+
+def encrypt_aes(data, key, iv):
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    ciphertext = cipher.encrypt(pad(data, AES.block_size))
+    return ciphertext
+
+
+def get_nonce():
+    # simulate reading the nonce value from packet
+    return b'\xccW\xceWE\xe1\xa4\x93'
+
+
+def get_encrypted_nonce():
+    # simulate reading the encrypted nonce packet
+    return b'\x83Xb%0\n\xcd!-V\xca\x04l\x8bC;'
+
+
+def get_iv():
+    # simulate reading the iv value from packet
+    return b'\xdbw\xab\xfb\xc7\xc7\x9a\xe6\xc2h\x96\x91\xc8a\xd9\x1a'
 
 
 class PasswordDict:
-    passwords = []
+    lines = []
     hashed_passwords = []
 
     def __init__(self):
-        if not os.path.exists("passwords"):
-            logger.error(f"password file doesn't exist")
+        if not os.path.exists("hashedPasswords"):
+            print("No hash table found!, exiting")
+            exit(1)
         else:
-            with open("passwords", 'r') as file:
+            with open("hashedPasswords", 'r') as file:
                 file_content = file.read()
-                self.passwords = [passwordRow.strip() for passwordRow in file_content.split('\n') if passwordRow]
+                self.lines = [passwordRow.strip() for passwordRow in file_content.split('\n') if passwordRow]
+                self._hashed_passwords()
 
-    def hashed_passwords(self):
-        for password in self.passwords:
-            self.hashed_passwords.append(SHA256.new(password.encode()).hexdigest())
+    def _hashed_passwords(self):
+        for line in self.lines:
+            password = line[:line.find(":")]
+            hash = line[line.find(":") + 1:]
+            self.hashed_passwords.append((password, hash))
         return self.hashed_passwords
 
 
 class DictionaryAttack:
     password_dict = PasswordDict()
-    client_nonce = -1
-    server_nonce = -1
-    iv = -1
-
-    def __init__(self, client_nonce, server_nonce, iv):
-        self.client_nonce = client_nonce
-        self.server_nonce = server_nonce
-        self.iv = iv
-
-    def encrypt_aes(self, data, key, iv):
-        cipher = AES.new(key, AES.MODE_CBC, iv)
-        ciphertext = cipher.encrypt(pad(data, AES.block_size))
-        return ciphertext
+    client_nonce = get_nonce()
+    iv = get_iv()
+    encrypted_nonce = get_encrypted_nonce()
 
     def encrypt_and_compare(self):
-        for hashed_password in self.password_dict.hashed_passwords():
-            attempted_encrypted_nonce = self.encrypt_aes(self.client_nonce, hashed_password, self.iv)
-            if attempted_encrypted_nonce == self.server_nonce:
-                return True
-        return False
+        for pass_tuple in self.password_dict.hashed_passwords:
+            attempted_encrypted_nonce = encrypt_aes(self.client_nonce, bytes.fromhex(pass_tuple[1]), self.iv)
+            if attempted_encrypted_nonce == self.encrypted_nonce:
+                print(f"Found the password! the password is: {pass_tuple[0]}")
+                return
+
+        print(f"the password is not found in this dictionary")
 
 
-
-
-
-
-
-
-
-
+if __name__ == '__main__':
+    DictionaryAttack().encrypt_and_compare()
