@@ -26,7 +26,8 @@ def get_nonce():
 
 
 def get_encrypted_nonce():
-    # simulate reading the encrypted nonce packet
+    # simulate reading the encrypted nonce from packet
+    # the nonce encrypted with one of the passwords that is found in the hashed passwords
     return b'\x83Xb%0\n\xcd!-V\xca\x04l\x8bC;'
 
 
