@@ -290,7 +290,7 @@ class AuthServer:
 
         ticket_iv = self.generate_iv()
 
-        part_1 = struct.pack("<B16s16sQ16s", self.VERSION, client_id.encode(), server_id.encode(),
+        part_1 = struct.pack("<B16s16sQ16s", self.VERSION, uuid.UUID(client_id).bytes, server_id.encode(),
                              current_timestamp, ticket_iv)
 
         # reads message server password to be used as the key for the ticket encryption

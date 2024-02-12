@@ -8,7 +8,6 @@ import struct
 from enum import Enum
 from logging import Logger
 
-from Crypto.Random import get_random_bytes
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
@@ -23,12 +22,6 @@ class CODE(Enum):
     MSG_RECEIVED = 1605
 
     GENERAL_ERROR = 1609
-
-
-def encrypt_aes(data, key):
-    cipher = AES.new(key, AES.MODE_CBC, get_random_bytes(AES.block_size))
-    ciphertext = cipher.encrypt(pad(data.encode(), AES.block_size))
-    return cipher.iv + ciphertext
 
 
 def decrypt_aes(ciphertext, key, iv):
@@ -69,6 +62,12 @@ class Message:
     def message_received(version):
         return Message(version, CODE.MSG_RECEIVED.value, 0, None).get_bytes()
 
+    @staticmethod
+    def error_response(version):
+        payload_size = 0
+        response = struct.pack(f"<BHI", version, CODE.GENERAL_ERROR.value, payload_size)
+        return response
+
 
 class MessageServer:
     HOST: str
@@ -79,8 +78,7 @@ class MessageServer:
 
     version = 24
 
-    # todo change users data
-    users_data = []
+    users_data = {}
 
     sel = selectors.DefaultSelector()
 
@@ -176,7 +174,6 @@ class MessageServer:
         analyze the data that is received and acts as an api gateway
         :param recv_data: the data that received
         """
-        # Todo check that all the values in the ticket and auth are all right
         try:
             header = struct.unpack("<16sBHI", recv_data[:23])
             message_code = header[2]
@@ -184,34 +181,59 @@ class MessageServer:
             if message_code == CODE.CLIENT_SENDING_KEY_TO_SERVER_MSG.value:
                 authenticator = struct.unpack("<16s16s32s32s16s", recv_data[23:135])
                 ticket = struct.unpack("<B16s16sQ16s48s16s", recv_data[135:])
+                ticket_iv = ticket[4]
+                authenticator_iv = authenticator[0]
+                client_id_ticket = ticket[1]
 
-                aes_key = decrypt_aes(ticket[5], self.servers_password, ticket[4])
-                expiration_timestamp = decrypt_aes(ticket[6], self.servers_password, ticket[4])
+                aes_key = decrypt_aes(ticket[5], self.servers_password, ticket_iv)
+                expiration_timestamp = decrypt_aes(ticket[6], self.servers_password, ticket_iv)
                 expiration_timestamp = int.from_bytes(expiration_timestamp, "little")
                 expiration_timestamp = datetime.datetime.fromtimestamp(expiration_timestamp)
-                # print(f"{expiration_timestamp}")
 
-                # todo change users data
-                self.users_data.append({"key": aes_key})
+                authenticator_client_id = decrypt_aes(authenticator[2], aes_key, authenticator_iv)
+                if client_id_ticket != authenticator_client_id:
+                    raise "client id in ticket and auth do not match"
+
+                self.users_data[str(client_id_ticket)] = (aes_key, expiration_timestamp)
 
                 # confirm to client that the message received
                 print("Received ticket & auth from client ")
                 self.messages.put(Message.symmetric_key_confirmation(self.version))
             if message_code == CODE.CLIENT_SENDING_MSG_TO_SERVER_MSG.value:
                 payload = struct.unpack("<I16s", recv_data[23:43])
+                client_id = header[0]
                 msg_size = payload[0]
                 iv = payload[1]
 
                 message = struct.unpack(f"<{msg_size}s", recv_data[43:])
-                # todo change users data
-                key = self.users_data[0]["key"]
+
+                if not self.users_data.get(str(client_id)):
+                    self.messages.put(Message.error_response(self.version))
+                    print("client id not found")
+                    return
+
+                # first index is the aes key
+                key = self.users_data.get(str(client_id))[0]
+                # second index is the expiration timestamp
+                expiration_timestamp = self.users_data.get(str(client_id))[1]
+
+                current_time = datetime.datetime.now()
+                if current_time > expiration_timestamp:
+                    self.messages.put(Message.error_response(self.version))
+                    print("Ticket timestamp expired please ask for a new key from Auth server")
+                    return
+
+                # prints client message
                 print(decrypt_aes(message[0], key, iv).decode())
 
                 # send messages back to confirm the message received
                 self.messages.put(Message.message_received(self.version))
 
         except Exception as e:
-            print(e)
+            # returns general error response code
+            print("An error occurred:" + str(e))
+            print("returns client error response code")
+            self.messages.put(Message.error_response(self.version))
 
 
 if __name__ == '__main__':
