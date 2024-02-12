@@ -11,7 +11,7 @@ from typing import Any
 
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
-from Crypto.Util.Padding import pad, unpad
+from Crypto.Util.Padding import pad
 from Crypto.Hash import SHA256
 from logging import Logger
 import queue
@@ -46,7 +46,7 @@ class ClientFauxDB:
                 # client data processed into rows
                 clients_raw_data = [rawData.strip() for rawData in file_content.split('\n') if rawData]
 
-                # parse data from the following format ID:Name:PasswordHash:LastSeen to objects for faster performance
+                # parse data from the following format ID:Name:PasswordHash:LastSeen to objects
                 clients_data = []
                 for rawData in clients_raw_data:
                     raw_data_sub_string = rawData.split(':')  # assuming data integrity from file
@@ -57,7 +57,7 @@ class ClientFauxDB:
                     clients_data.append(new_data_entry)
                 return clients_data
         except Exception as e:
-            logger.error(f'Failed to read from faux DB' + e)
+            logger.error(f'Failed to read from faux DB {e}')
             return []
 
     def is_username_exists(self, username):
@@ -103,23 +103,40 @@ class RESPONSE(Enum):
 
     SYMMETRIC_KEY_SUCCESS = 1603
 
+    GENERAL_ERROR = 1609
 
+
+# Todo check that it's multithreaded
 class AuthServer:
-    HOST = "127.0.0.1"
+    # reads it's ip address from msg.info
+    ADDRESS: str
+
+    # default port if port.info doesn't exists
     PORT = 1256
     VERSION = 24
     sel = selectors.DefaultSelector()
 
+    # message queue to store message to send in next iteration of server
     messages = queue.Queue()
     socket: socket = None
 
     def __init__(self):
         self.data = None
+        # reads the port from port.info
         if not os.path.exists("port.info"):
-            logger.error(f"Port.info file doesn't exists, defaults to port 1256")
+            logger.error(f"Port.info file doesn't exist, defaults to port 1256")
         else:
             with open("port.info", 'r') as file:
                 self.PORT = file.readline()
+
+            # reads the ip address from srv.info
+            try:
+                with open("srv.info", 'r') as file:
+                    line = file.readline()
+                    self.ADDRESS = line[:line.find(":")]
+            except Exception as e:
+                print("Error is srv.info exists?")
+                print(e)
 
     def start_server(self):
         """
@@ -128,7 +145,7 @@ class AuthServer:
         import socket
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
 
-            server_socket.bind((self.HOST, int(self.PORT)))
+            server_socket.bind((self.ADDRESS, int(self.PORT)))
             server_socket.listen()
             server_socket.setblocking(False)
             self.sel.register(server_socket, selectors.EVENT_READ, data=None)
@@ -178,33 +195,30 @@ class AuthServer:
     def receive_data(self, key):
         sock: socket.socket = key.fileobj
 
-        #  makeshift API gateway
+        #  API gateway
         try:
             recv_data = sock.recv(4096)  # 4kb buffer size
-            print(recv_data)
+            # the header found in the first 23 bytes of the message
+            header_offset = 23
             #  recv_data contains the request data and the header to redirect request to the correct server function
-            request_headers = struct.unpack("<16sBHI", recv_data[:23])
+            request_headers = struct.unpack("<16sBHI", recv_data[:header_offset])
+            # the second field of header is the request code
             request_code = request_headers[2]
-            print(request_headers)
-            #  Parse data and store in a variable
             if request_code == RequestCode.CLIENT_REQUEST_SIGNUP.value:
-                payload = struct.unpack("<255s255s", recv_data[23:])
+                payload = struct.unpack("<255s255s", recv_data[header_offset:])
                 return self.register_new_client(request_headers, payload)
             elif request_code == RequestCode.CLIENT_REQUEST_AES_KEY_FOR_SERVER_MSG.value:
-                return self.generate_key_and_ticket(request_headers, recv_data[23:])
+                return self.generate_key_and_ticket(request_headers, recv_data[header_offset:])
 
         except ConnectionResetError:
             logger.debug("An existing connection was forcibly closed by the remote host")
             self.sel.unregister(sock)
             sock.close()
 
-        except Exception:  # placeholder to prevent server crash
-            logger.debug("General Exception")
+        except Exception as e:
+            logger.debug(f"General Exception {e}")
             self.sel.unregister(sock)
             sock.close()
-            return
-
-        if not recv_data:
             return
 
     def send_msg(self, msg: Any) -> int:
@@ -217,15 +231,18 @@ class AuthServer:
                 raise Exception("Could not have sent Message")
 
     def generate_key_and_ticket(self, headers, payload):
-
         client_id = str(uuid.UUID(bytes=headers[0]))
         payload = struct.unpack("<16sQ", payload)
-        # todo change so that we read the server id from srv.info
-        server_id = payload[0].decode()
+        with open("msg.info", "r") as msg_file:
+            msg_file.readline()
+            msg_file.readline()
+            server_id = msg_file.readline()[:-1]
+            server_id = str(uuid.UUID(server_id))
+
         nonce = payload[1]
         iv = self.generate_iv()
 
-        # Server sends a session key
+        # Server Generates aes key for client & message server
         aes_key = self.generate_key()
 
         # Server receives authentication request and performs a lookup on the user
@@ -234,10 +251,10 @@ class AuthServer:
             try:
                 client_id_field = struct.pack("<16s", uuid.UUID(client_id).bytes)
                 encrypted_key_field = struct.pack("<16s", iv) + self.create_key_field(aes_key, client_id, nonce, iv)
-                ticket_field = self.create_ticket_field(client_id, server_id, iv, aes_key)
+                ticket_field = self.create_ticket_field(client_id, server_id, aes_key)
 
                 payload_size = len(client_id_field) + len(encrypted_key_field) + len(ticket_field)
-                headers_response = struct.pack(f"<BHI", self.VERSION, RESPONSE.SYMMETRIC_KEY_SUCCESS.value,
+                headers_response = struct.pack("<BHI", self.VERSION, RESPONSE.SYMMETRIC_KEY_SUCCESS.value,
                                                payload_size)
                 response_payload = client_id_field + encrypted_key_field + ticket_field
 
@@ -248,50 +265,50 @@ class AuthServer:
                 print(e)
         else:
             print("client id not exists")
-            # Todo should return message with fail code
-            pass
+            self.error_response()
+
+    def error_response(self):
+        payload_size = 0
+        response = struct.pack(f"<BHI", self.VERSION, RESPONSE.GENERAL_ERROR.value, payload_size)
+        self.messages.put(response)
+
 
     def create_key_field(self, aes_key, client_id, nonce, iv):
         client_hashed_password = clients_db.get_password(client_id)
         client_hashed_password = bytes.fromhex(client_hashed_password)
 
-        data = nonce.to_bytes(8, 'little')
+        data = int.to_bytes(nonce, 8, "little")
         encrypted_nonce = self.encrypt_aes(data, client_hashed_password, iv)
         encrypted_aes_key = self.encrypt_aes(bytes(aes_key), client_hashed_password, iv)
 
-        print(f"bytes fo aes key:,{bytes(aes_key)}")
-        # print(f"decrypt aes key: {self.decrypt_aes(encrypted_aes_key, client_hashed_password, iv)}")
-
         return struct.pack("<16s48s", encrypted_nonce, encrypted_aes_key)
 
-    def create_ticket_field(self, client_id, server_id, iv, aes_key):
-
+    def create_ticket_field(self, client_id, server_id, aes_key):
         current_timestamp = int(time.time())
 
-        # Add 3600 seconds (1 hour) to the current timestamp
+        # Add 3600 seconds (1 hour) to the current timestamp for expiration timestamp
         expiration_timestamp = current_timestamp + 3600
 
-        # Todo should make new iv for msg server
-        # Todo change server id it's not coming as it should from the client
-        part_1 = struct.pack("<B16s16sQ16s", self.VERSION, client_id.encode(), server_id.encode(),
-                             current_timestamp, iv)
+        ticket_iv = self.generate_iv()
 
-        # To read from msg.info
+        part_1 = struct.pack("<B16s16sQ16s", self.VERSION, uuid.UUID(client_id).bytes, server_id.encode(),
+                             current_timestamp, ticket_iv)
+
+        # reads message server password to be used as the key for the ticket encryption
         hashed_msg_server_password: bytes
         with open("msg.info", "r") as msg_file:
+            msg_file.readline()
             msg_file.readline()
             msg_file.readline()
             line = msg_file.readline()
             hashed_msg_server_password = base64.b64decode(line)
 
-        encrypted_aes_key = self.encrypt_aes(bytes(aes_key), hashed_msg_server_password, iv)
-        time_expiration_bytes = expiration_timestamp.to_bytes((expiration_timestamp.bit_length() + 7) // 8, 'little')
-        encrypted_expiration_time = self.encrypt_aes(time_expiration_bytes, hashed_msg_server_password, iv)
+        # encrypts key and expiration time in the ticket with message server password
+        encrypted_aes_key = self.encrypt_aes(bytes(aes_key), hashed_msg_server_password, ticket_iv)
+        time_expiration_bytes = int.to_bytes(expiration_timestamp, 8, "little")
+        encrypted_expiration_time = self.encrypt_aes(time_expiration_bytes, hashed_msg_server_password, ticket_iv)
 
-        part_2 = struct.pack("<48s24s", encrypted_aes_key, encrypted_expiration_time)
-
-        print("ticket bytes")
-        print(part_1 + part_2)
+        part_2 = struct.pack("<48s16s", encrypted_aes_key, encrypted_expiration_time)
         return part_1 + part_2
 
     def register_new_client(self, request_headers, payload):
@@ -305,22 +322,21 @@ class AuthServer:
         if not clients_db.is_username_exists(username):
             try:
                 clients_db.clients_write_data(new_uuid, username, password, datetime.now())
-                response = struct.pack(f"<bHI16s", self.VERSION, RESPONSE.AUTH_SERVER_REGISTRATION_SUCCESS.value,
+                response = struct.pack("<BHI16s", self.VERSION, RESPONSE.AUTH_SERVER_REGISTRATION_SUCCESS.value,
                                        4, new_uuid.bytes)
                 logger.info(f'User {username} was registered successfully.')
                 self.messages.put(response)
-            except Exception as e:  # db write failure
+            except Exception as e:
+                # db write failure
                 print(e)
                 payload_size = len(request_headers[0])
-                response = struct.pack(f"<bHI16s", self.VERSION, RESPONSE.AUTH_SERVER_REGISTRATION_FAIL,
+                response = struct.pack("<BHI16s", self.VERSION, RESPONSE.AUTH_SERVER_REGISTRATION_FAIL.value,
                                        payload_size.to_bytes(4, byteorder='little'), new_uuid)
                 self.messages.put(response)
-        else:  # user already exists
+        else:
+            # user already exists
             logger.info(f'User {username} is already registered.')
-            payload_size = 0
-            response = struct.pack(f"<bHI", self.VERSION, RESPONSE.AUTH_SERVER_REGISTRATION_FAIL,
-                                   payload_size.to_bytes(0, byteorder='little'))
-            return self.messages.put(response)
+            self.error_response()
 
     @staticmethod
     def generate_iv():
