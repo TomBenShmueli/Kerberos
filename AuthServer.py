@@ -124,7 +124,7 @@ class AuthServer:
         self.data = None
         # reads the port from port.info
         if not os.path.exists("port.info"):
-            logger.error(f"Port.info file doesn't exists, defaults to port 1256")
+            logger.error(f"Port.info file doesn't exist, defaults to port 1256")
         else:
             with open("port.info", 'r') as file:
                 self.PORT = file.readline()
@@ -271,6 +271,7 @@ class AuthServer:
         payload_size = 0
         response = struct.pack(f"<BHI", self.VERSION, RESPONSE.GENERAL_ERROR.value, payload_size)
         self.messages.put(response)
+
 
     def create_key_field(self, aes_key, client_id, nonce, iv):
         client_hashed_password = clients_db.get_password(client_id)
